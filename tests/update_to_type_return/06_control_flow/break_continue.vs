@@ -1,7 +1,7 @@
 package control_flow_test
 build test
 
-func test_break_stops_for_loop() test -> Expected("4") {
+func test_break_stops_for_loop() test -> Expected(int32, "4") {
     var last: int32 = 0
     for n in 0..<10 {
         if n == 5 { break }
@@ -10,7 +10,7 @@ func test_break_stops_for_loop() test -> Expected("4") {
     return last
 }
 
-func test_continue_skips_even() test -> Expected("25") {
+func test_continue_skips_even() test -> Expected(int32, "25") {
     var sum: int32 = 0
     for i in 0..<10 {
         if i % 2 == 0 { continue }
@@ -19,7 +19,7 @@ func test_continue_skips_even() test -> Expected("25") {
     return sum
 }
 
-func test_break_stops_while() test -> Expected("3") {
+func test_break_stops_while() test -> Expected(int32, "3") {
     var n: int32 = 0
     while true {
         n += 1
@@ -28,7 +28,7 @@ func test_break_stops_while() test -> Expected("3") {
     return n
 }
 
-func test_continue_only_odd_count() test -> Expected("5") {
+func test_continue_only_odd_count() test -> Expected(int32, "5") {
     var count: int32 = 0
     for i in 0..<10 {
         if i % 2 == 0 { continue }
