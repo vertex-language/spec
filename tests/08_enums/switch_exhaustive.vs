@@ -18,7 +18,7 @@ func coinValue(c: Coin) -> int32 {
     }
 }
 
-func test_exhaustive_no_default_needed() test -> Expected("banana") {
+func test_exhaustive_no_default_needed() test -> Expected(string, "banana") {
     let f = Fruit.banana
     switch f {
     case .apple:  return "apple"
@@ -27,7 +27,7 @@ func test_exhaustive_no_default_needed() test -> Expected("banana") {
     }
 }
 
-func test_exhaustive_context_type() test -> Expected("cherry") {
+func test_exhaustive_context_type() test -> Expected(string, "cherry") {
     let f: Fruit = .cherry
     switch f {
     case .apple:  return "apple"
@@ -36,14 +36,14 @@ func test_exhaustive_context_type() test -> Expected("cherry") {
     }
 }
 
-func test_coin_penny() test -> Expected("1") {
+func test_coin_penny() test -> Expected(int32, "1") {
     return coinValue(c: .penny)
 }
 
-func test_coin_quarter() test -> Expected("25") {
+func test_coin_quarter() test -> Expected(int32, "25") {
     return coinValue(c: .quarter)
 }
 
-func test_coin_dime() test -> Expected("10") {
+func test_coin_dime() test -> Expected(int32, "10") {
     return coinValue(c: .dime)
 }

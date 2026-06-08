@@ -1,7 +1,7 @@
 package type_conversion_test
 build test
 
-func test_int_to_float32() test -> Expected(float32, "42") {
+func test_int_to_float32() test -> Expected(float32, "42.000000") {
     let i: int32 = 42
     let f: float32 = float32(i)
     return f

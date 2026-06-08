@@ -1,7 +1,7 @@
 package control_flow_test
 build test
 
-func test_switch_string_first() test -> Expected("hello") {
+func test_switch_string_first() test -> Expected(string, "hello") {
     let s: string = "hello"
     switch s {
     case "hello":
@@ -13,7 +13,7 @@ func test_switch_string_first() test -> Expected("hello") {
     }
 }
 
-func test_switch_string_second() test -> Expected("world") {
+func test_switch_string_second() test -> Expected(string, "world") {
     let s: string = "world"
     switch s {
     case "hello":
@@ -25,7 +25,7 @@ func test_switch_string_second() test -> Expected("world") {
     }
 }
 
-func test_switch_string_default() test -> Expected("other") {
+func test_switch_string_default() test -> Expected(string, "other") {
     let s: string = "foo"
     switch s {
     case "hello":

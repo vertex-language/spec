@@ -1,7 +1,7 @@
 package control_flow_test
 build test
 
-func test_while_counts_up() test -> Expected("5") {
+func test_while_counts_up() test -> Expected(int32, "5") {
     var i: int32 = 0
     while i < 5 {
         i += 1
@@ -9,7 +9,7 @@ func test_while_counts_up() test -> Expected("5") {
     return i
 }
 
-func test_while_skipped_when_false() test -> Expected("0") {
+func test_while_skipped_when_false() test -> Expected(int32, "0") {
     var i: int32 = 0
     while i > 0 {
         i += 1
@@ -17,7 +17,7 @@ func test_while_skipped_when_false() test -> Expected("0") {
     return i
 }
 
-func test_while_accumulates() test -> Expected("10") {
+func test_while_accumulates() test -> Expected(int32,"10") {
     var sum: int32 = 0
     var i: int32 = 1
     while i <= 4 {
@@ -27,7 +27,7 @@ func test_while_accumulates() test -> Expected("10") {
     return sum
 }
 
-func test_while_true_break() test -> Expected("5") {
+func test_while_true_break() test -> Expected(int32, "5") {
     var n: int32 = 0
     while true {
         if n >= 5 { break }

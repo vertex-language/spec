@@ -12,7 +12,7 @@ enum Permission {
     case read, write, execute
 }
 
-func test_enum_switch_north() test -> Expected("north") {
+func test_enum_switch_north() test -> Expected(string, "north") {
     let d = Direction.north
     switch d {
     case .north: return "north"
@@ -22,7 +22,7 @@ func test_enum_switch_north() test -> Expected("north") {
     }
 }
 
-func test_enum_switch_west() test -> Expected("west") {
+func test_enum_switch_west() test -> Expected(string, "west") {
     let d = Direction.west
     switch d {
     case .north: return "north"
@@ -32,24 +32,24 @@ func test_enum_switch_west() test -> Expected("west") {
     }
 }
 
-func test_enum_equality_same() test -> Expected("1") {
+func test_enum_equality_same() test -> Expected(bool, "1") {
     let a = Direction.south
     let b = Direction.south
     return a == b
 }
 
-func test_enum_equality_different() test -> Expected("0") {
+func test_enum_equality_different() test -> Expected(bool, "0") {
     let a = Direction.north
     let b = Direction.south
     return a == b
 }
 
-func test_enum_inequality() test -> Expected("1") {
+func test_enum_inequality() test -> Expected(bool, "1") {
     let a = Direction.north
     return a != Direction.east
 }
 
-func test_enum_context_inference() test -> Expected("write") {
+func test_enum_context_inference() test -> Expected(string, "write") {
     let p: Permission = .write
     switch p {
     case .read:    return "read"

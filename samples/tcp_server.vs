@@ -38,7 +38,7 @@ func main() -> int {
     // 2 ── SO_REUSEADDR — allows restart without waiting out TIME_WAIT
     //      SOL_SOCKET=1, SO_REUSEADDR=2
     var opt: int32 = 1
-    if libc.setsockopt(sfd, 1, 2, reinterpret<*const char>(&opt), 4) < 0 {
+    if libc.setsockopt(sfd, 1, 2, &opt as *const char, 4) < 0 {
         libc.printf("setsockopt() failed\n")
         libc.exit(1)
     }
@@ -50,7 +50,7 @@ func main() -> int {
         sin_addr:   0,
         sin_zero:   int64(0),
     }
-    if libc.bind(sfd, reinterpret<*const char>(&addr), 16) < 0 {
+    if libc.bind(sfd, &addr as *const char, 16) < 0 {
         libc.printf("bind() failed\n")
         libc.exit(1)
     }
@@ -71,7 +71,7 @@ func main() -> int {
             sin_addr:   0,
             sin_zero:   int64(0),
         }
-        var cfd = libc.accept(sfd, reinterpret<*char>(&caddr), &clen)
+        var cfd = libc.accept(sfd, &caddr as *char, &clen)
         if cfd >= 0 {
             libc.printf("client connected  fd=%d\n", cfd)
 
@@ -86,7 +86,7 @@ func main() -> int {
                 //if n <= 0 {
                 //    break
                 //}
-                //libc.write(cfd, reinterpret<*const char>(&buf_ptr[0]), n)
+                //libc.write(cfd, &buf_ptr[0] as *const char, n)
                 //libc.free(buf_ptr)
 
             //}    
