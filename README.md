@@ -237,7 +237,7 @@ The `as` operator performs explicit type conversion. It is used for numeric wide
 var opt: int32 = 1
 libc.setsockopt(sfd, 1, 2, &opt as *const char, 4)
 
-var buf: [256]uint8
+var buf: [uint8](256)
 libc.recv(fd, &buf as *char, 256, 0)
 
 // ── integer widening ──────────────────────────────────────────────────────────
