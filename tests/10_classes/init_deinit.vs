@@ -15,19 +15,14 @@ func (b: *Box) deinit() {
     b.ready = false
 }
 
-func test_init_sets_value() test -> Expected("42") {
+func test_init_sets_value() test -> Expected(int32, "42") {
     let b = Box(val: 42)
     defer b.delete()
     return b.value
 }
 
-func test_init_sets_bool_field() test -> Expected("1") {
+func test_init_sets_bool_field() test -> Expected(int32, "1") {
     let b = Box(val: 10)
     defer b.delete()
     return b.ready
-}
-
-func test_deinit_no_crash() test {
-    let b = Box(val: 1)
-    b.delete()    // deinit runs here
 }
