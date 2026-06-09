@@ -1198,8 +1198,8 @@ struct Box<T> {
     value: T
 }
 
-let b      = Box{value: 42}
-let result = identity(value: "hello")
+let b      = Box<T>{value: 42}
+let result = identity<T>(value: "hello")
 ```
 
 ---
