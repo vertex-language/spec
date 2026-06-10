@@ -592,79 +592,103 @@ for n in nums {
 
 ## 24. Arrays
 
+**Declaration forms at a glance:**
+
+| Form | Storage | Growable | Notes |
+|------|---------|----------|-------|
+| `var buf: [uint8; 1024]` | stack | no | zero-filled, mutable elements |
+| `var arr: [int32; 3] = [1, 2, 3]` | stack | no | mutable, initialized |
+| `let arr = [1, 2, 3]` | stack / rodata | no | immutable, inferred `[int32; 3]` |
+| `let arr: [uint8; 3] = [0xFF, 0x00, 0xAB]` | stack / rodata | no | immutable, annotated |
+| `var x: [int32] = []` | heap | yes | empty dynamic |
+| `var x = [1, 2, 3]` | heap | yes | dynamic from literal |
+| `var x: [int32] = [1, 2, 3]` | heap | yes | annotated dynamic |
+
+The rule: `[T; N]` → always fixed stack. `[T]` → always dynamic heap. `let` → immutable. `var` → mutable.
+
+---
+
 ### 24.1 Fixed Arrays
 
-Fixed arrays are stack-allocated with a size known at compile time.
+Fixed arrays are stack-allocated. Size is fixed at compile time and is part of the type — `[uint8; 1024]` and `[uint8; 512]` are distinct types. `push`, `pop`, `shift`, `unshift`, `.reserve()`, and `.delete()` are compile errors on any fixed array.
 
 ```vertex
-// zero-filled, fixed size — short form (zero implied)
-var buf  = [uint8](1024)
-var nums = [int32](5)
+// zero-filled mutable — annotation only, no = required
+var buf:  [uint8; 1024]
+var nums: [int32; 16]
 
-// zero-filled, fixed size — long form
-var buf  = [uint8](repeating: 0, count: 1024)
-var nums = [int32](repeating: 0, count: 5)
+// non-zero fill — declare then fill
+var mask: [uint8; 64]
+mask.fill(0xFF)
 
-// non-zero fill — long form required
-var mask = [uint8](repeating: 0xFF, count: 64)
+// mutable with initializer
+var coords: [int32; 3] = [10, 20, 30]
 
-// literal
-let flags = [0xFF, 0x00, 0xAB]
-let typed: [uint8] = [1, 2, 3]
+// fixed immutable literal — let binding
+let nums  = [1, 2, 3]                         // inferred: [int32; 3]
+let flags: [uint8; 3] = [0xFF, 0x00, 0xAB]
 
-// trailing comma — valid in multi-line literals
-let bytes: [uint8] = [
+// trailing comma valid in multiline literals
+let bytes: [uint8; 3] = [
     0xFF,
     0x00,
     0xAB,
 ]
 
 // nested (multidimensional)
-let matrix = [[1, 2], [3, 4]]
-let grid: [[float32]] = [
+let matrix: [[float32; 2]; 2] = [
     [0.0, 1.0],
     [1.0, 0.0],
 ]
 
 // read / write
-let first = nums[0]
-nums[0] = 99
+let first = buf[0]
+buf[0]    = 255     // requires var binding
 ```
 
 **Rules:**
 
-* `[T](n)` allocates `n` elements of type `T`, all zero-filled. Prefer this form
-  when the fill value is zero.
-* `[T](repeating: v, count: n)` allocates `n` elements all set to `v`. Required
-  when the fill value is not zero.
-* Size must be a compile-time integer literal.
-* Subscript read is valid on both `let` and `var` bindings.
-* Subscript write requires the array binding to be `var`.
+* `var name: [T; N]` declares a zero-filled stack array of `N` elements. No `= ` required — zero-fill is implicit.
+* `N` must be a compile-time integer literal.
+* `var name: [T; N] = [...]` initializes with explicit values. The literal must contain exactly `N` elements.
+* `let` binding — all elements are immutable; subscript write is a compile error.
+* `var` binding — elements are mutable; subscript write is allowed. Size is still fixed.
+* `[T; N]` and `[T; M]` are distinct types when `N ≠ M`.
+* `push`, `pop`, `shift`, `unshift`, `.reserve()`, and `.delete()` are compile errors on any fixed array.
+* No `.delete()` needed — fixed arrays are freed automatically at scope exit.
 * Index bounds are not checked at compile time — out-of-bounds is a runtime error.
-* No `.delete()` is needed — fixed arrays are stack-allocated and freed automatically.
 
 ---
 
-### 24.2 Growable Arrays
+### 24.2 Dynamic Arrays
 
-Growable arrays are heap-allocated and must be freed with `.delete()`.
+Dynamic arrays are heap-allocated and growable. `var` with a `[T]` type (no size) always produces a dynamic array.
 
 ```vertex
-// empty
-var items = [int32]()
-defer items.delete()
+// empty — type annotation required
+var items:   [int32] = []
+var players: [Player] = []
+var buf:     [uint8] = []
 
-// pre-allocated capacity
-var items = [int32](capacity: 64)
+// from literal — var + = [...] = dynamic
+var scores = [10, 20, 30]             // [int32] inferred
+var names: [string] = ["a", "b"]
+
+// capacity hint — avoids realloc churn when final count is known upfront
+var items: [int32] = []
+items.reserve(64)
+
 defer items.delete()
 ```
 
 **Rules:**
 
-* `[T]()` creates an empty growable array.
-* `[T](capacity: n)` pre-allocates `n` slots without setting length.
-* The caller is responsible for calling `.delete()` — failing to do so is a
-  memory leak.
+* `var x: [T] = []` creates an empty dynamic array. The type annotation is required — element type cannot be inferred from `[]` alone.
+* `var x = [v1, v2, v3]` creates a dynamic array. Element type is inferred from the literal. `var` with no size annotation drives the heap allocation.
+* `var x: [T] = [v1, v2, v3]` — annotated dynamic array with initial values.
+* `let x = [v1, v2, v3]` creates a **fixed immutable** array — `let` with a literal infers `[T; N]`, not `[T]`. The array is stack-allocated and `.push()` is a compile error.
+* `.reserve(n)` pre-allocates `n` slots without setting length. Valid on dynamic arrays only.
+* Dynamic arrays are heap-allocated. The caller must call `.delete()` — failing to do so is a memory leak.
 * `defer items.delete()` is the recommended pattern.
 
 ---
@@ -681,6 +705,7 @@ let first = items.shift() // remove from front, returns T?
 
 **Rules:**
 
+* `push`, `unshift`, `pop`, and `shift` are only valid on dynamic arrays. Calling them on a fixed array is a compile error.
 * `push` and `unshift` grow the array automatically.
 * `pop` and `shift` return `T?` — `nil` if the array is empty.
 
@@ -689,9 +714,9 @@ let first = items.shift() // remove from front, returns T?
 ### 24.4 Access
 
 ```vertex
-let n    = items.length  // element count
-let x    = items[0]      // subscript read
-items[0] = 99            // subscript write
+let n    = items.length   // element count
+let x    = items[0]       // subscript read
+items[0] = 99             // subscript write — requires var binding
 ```
 
 ---
@@ -715,10 +740,11 @@ let i = items.findIndex(func(x: int32) -> bool {
 
 ### 24.6 In-Place Mutation
 
-These methods mutate the array without allocating — no `.delete()` needed on
-the result.
+These methods mutate the array without allocating — no `.delete()` needed on the result.
 
 ```vertex
+items.reserve(64)   // pre-allocate capacity — dynamic arrays only
+
 items.sort(func(a: int32, b: int32) -> int32 {
     return a - b
 })
@@ -733,8 +759,7 @@ items.fill(0, from: 1, to: 3)
 
 ### 24.7 Methods That Return a New Array
 
-These methods allocate a new array — the caller must call `.delete()` on the
-result.
+These methods allocate a new array — the caller must call `.delete()` on the result.
 
 ```vertex
 var doubled = items.map(func(x: int32) -> int32 {
@@ -768,7 +793,7 @@ items.forEach(func(x: int32) {
 
 ### 24.9 Struct Arrays
 
-Structs are copied by value on push — consistent with Vertex value semantics.
+Structs are copied by value on `push` — consistent with Vertex value semantics.
 
 ```vertex
 struct Vec2 {
@@ -782,7 +807,7 @@ struct Player {
     health:   int32
 }
 
-var players = [Player]()
+var players: [Player] = []
 defer players.delete()
 
 players.push(Player{
@@ -831,18 +856,15 @@ players.forEach(func(p: Player) {
 
 ### 24.10 Memory Rules
 
-| Method                                              | Allocates | Action required         |
-|-----------------------------------------------------|-----------|-------------------------|
-| `push` `unshift` `fill` `sort` `reverse`            | no        | nothing                 |
-| `pop` `shift`                                       | no        | nothing                 |
-| `map` `filter` `slice` `concat`                     | yes       | `defer result.delete()` |
-| construction `[T]()` `[T](capacity:)`               | yes       | `defer items.delete()`  |
-
----
-
-Renaming them to "Maps" is a great call. It aligns perfectly with the `map[K]V` keyword we just introduced and is generally a more precise term for this data structure in systems-level languages like Vertex.
-
-Here is the finalized **§25. Maps** section for your grammar document.
+| Form / Method | Allocates | Action required |
+|---|---|---|
+| `var buf: [T; N]` | no (stack) | nothing |
+| `let arr = [...]` | no (stack / rodata) | nothing |
+| `var x: [T] = []` | yes (heap) | `defer x.delete()` |
+| `var x = [...]` | yes (heap) | `defer x.delete()` |
+| `push` `unshift` `fill` `sort` `reverse` `reserve` | no | nothing |
+| `pop` `shift` | no | nothing |
+| `map` `filter` `slice` `concat` | yes | `defer result.delete()` |
 
 ---
 
