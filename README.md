@@ -212,7 +212,6 @@ numeric types.
 ```vertex
 let i: int    = 42
 let f: float32  = float32(i)       // int → float32, always safe
-let d: double = double(f)      // float32 → double, always safe
 let i2: int   = int(3.99)      // truncates toward zero → 3
 let b: int8   = int8(i)        // narrowing — wraps on overflow
 ```
@@ -1245,7 +1244,7 @@ func makeAdder(n: int32) -> func(int32) -> int32 { }
 func run(n: *int32, f: func(*int32)) { }
 
 // calling a function value — standard call syntax
-let result = double(21)
+let result = float32(21)
 ```
 
 **Rules:**
