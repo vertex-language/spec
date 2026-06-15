@@ -870,29 +870,29 @@ players.forEach(func(p: Player) {
 ## 26. Maps
 
 ```vertex
-// short form — type inferred
+// short form — type inferred from literal
 let somemap = {"a": 1, "b": 2}
 let val = somemap["a"]           // val: int32? — nil if key absent
 
 // long form — explicit type
 let typedMap: map[string]int32 = {"a": 1, "b": 2}
 
-// empty heap allocation
-var config = map[string]int32()
+// empty — type annotation required
+var config: map[string]int32 = {}
 defer config.delete()
 
 // mutation
 config["debug"] = 1
 config["verbose"] = 0
 config["debug"] = nil            // removes key
-
 ```
 
 **Rules:**
 
 * Map literals use brace syntax: `{"key": value, ...}`.
 * The formal type signature for a map is `map[KeyType]ValueType`.
-* `map[K]V()` creates an empty, heap-allocated map.
+* `{}` with a type annotation creates an empty, heap-allocated map. The type annotation is required — key and value types cannot be inferred from `{}` alone.
+* `let somemap = {}` is a compile error — no type annotation, no inference possible.
 * Key access always returns an optional (`T?`) — the key may not be present.
 * Key write requires the map binding to be `var`.
 * Assigning `nil` to a key removes it from the map.
