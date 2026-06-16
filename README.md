@@ -112,7 +112,9 @@ accepted everywhere a type is valid.
 ## 4. Pointer Types
 
 `*` in type position is a raw mutable pointer. `*const` is a raw read-only
-pointer. These are the only pointer types in Vertex.
+pointer. These are the only pointer types in Vertex. `T` here ranges over
+scalar types, struct types, and pointer types — never a class type. Classes
+are always heap references and may never appear after `*` (§31).
 
 ```vertex
 // raw mutable pointer
@@ -170,6 +172,9 @@ let elem  = &buf[0]     // *uint8 — array element address
   through a pointer receiver lowers to `p->x`.
 * `*T?` is a nullable pointer. `nil` is the zero value; the compiler enforces
   null-safety through the type system.
+* `*ClassName` is a compile error — class types are always heap references and
+  never take `*`. Struct types are the only user-defined types eligible for
+  `*` (§28–§29, §31).
 
 ---
 
@@ -542,7 +547,9 @@ the full model.
   parameter.
 * Reads and writes through a pointer parameter are auto-dereferenced by the
   compiler: `n += 1` lowers to `*n += 1` in C.
-* `*T` may be applied to any parameter.
+* `*T` may be applied to any non-class parameter type — scalar, struct, or
+  pointer. Class types are already references; `*ClassName` as a parameter
+  type is a compile error (§31).
 * Labels are erased at the call site in the lowered C output — the C call is
   always positional.
 
@@ -1008,6 +1015,18 @@ p.describe()
 p.reset()      // compiler inserts & automatically for pointer receiver
 ```
 
+**Class receivers:**
+
+```vertex
+// class receiver — already a reference; mutations affect the caller automatically
+func (a: Animal) rename(newName: string) {
+    a.name = newName    // lowers to a->name = newName
+}
+
+let rex = Animal(name: "Rex")
+rex.rename(newName: "Max")   // rex.name is now "Max"
+```
+
 **Rules:**
 
 * The receiver is declared in its own parentheses immediately after `func` and
@@ -1017,7 +1036,12 @@ p.reset()      // compiler inserts & automatically for pointer receiver
 * Value receiver `(p: T)` — the receiver is passed by value (copied). Mutations
   do not affect the caller.
 * Pointer receiver `(p: *T)` — the receiver is passed as a pointer. Mutations
-  affect the caller's binding.
+  affect the caller's binding. This form is for struct receivers only.
+* Class receivers are always written as the plain class type, e.g. `(a: Animal)`
+  — never `(a: *Animal)`. Because classes are already heap references, a class
+  receiver behaves like a pointer receiver automatically: mutations affect the
+  caller's instance and field access lowers to `->` in C. `(a: *Animal)` is a
+  compile error (§31).
 * For pointer receivers, the compiler automatically inserts `&` at call sites —
   the caller writes `p.reset()`, not `reset(&p)`.
 * Reads and writes through a pointer receiver are auto-dereferenced: `.x`
@@ -1100,20 +1124,30 @@ enum Planet: string {
 
 ```vertex
 class Animal {
-    name: string
+  name: string
 }
 
-func (a: *Animal) init(name: string) {
-    a.name = name
+func (a: Animal) init(name: string) {
+  a.name = name
 }
 
-func (a: *Animal) deinit() {
-    // runs before memory is freed
+func (a: Animal) deinit() {
+  // runs before memory is freed
 }
 
 let a = Animal(name: "Rex")
 a.delete()
 ```
+
+**Reference semantics:**
+
+| Type        | Syntax       | Semantics                |
+|-------------|--------------|---------------------------|
+| class       | `Foo`        | always a heap reference   |
+| class opt   | `Foo?`       | nullable reference        |
+| class weak  | `weak Foo?`  | weak ARC reference        |
+| struct      | `Bar`        | value, stack allocated    |
+| struct ptr  | `*Bar`       | explicit pointer          |
 
 **Rules:**
 
@@ -1122,16 +1156,20 @@ a.delete()
 * A `let` binding freezes all fields — no field may be reassigned.
 * A `var` binding opens all fields — any field may be reassigned.
 * Classes are heap-allocated — the runtime cost is exactly what the programmer pays.
+* Class types are always references. `*ClassName` is a compile error — write
+  `Animal`, not `*Animal`. Struct types remain the only user-defined types that
+  take an explicit `*` (§4, §28).
 * Assignment passes a reference — two variables may point to the same object.
 * Identity operators `===` and `!==` compare references, not values.
 * Inheritance is not supported — classes are standalone types.
 * A class may contain fields whose type is a struct.
 * `init` is a reserved associated function name called automatically after
-  allocation. It must be declared with a pointer receiver
-  (e.g., `func (a: *Animal) init()`).
+  allocation. Its receiver is the plain class type
+  (e.g., `func (a: Animal) init()`) — classes are already references, so no
+  pointer receiver is needed or permitted.
 * `deinit` is a reserved associated function name. It runs automatically when
-  `.delete()` is called. It must be declared with a pointer receiver
-  (e.g., `func (a: *Animal) deinit()`).
+  `.delete()` is called. Its receiver is the plain class type
+  (e.g., `func (a: Animal) deinit()`).
 * Neither `init` nor `deinit` may be called directly.
 * If no `func init` is declared, the compiler provides a default memberwise
   initializer.
@@ -1518,7 +1556,7 @@ func process(s: string) -> Result(int32, string) {
 
 ---
 
-# Concurrency Architecture (v2.0)
+# Concurrency Architecture
 
 Vertex prioritizes absolute hardware transparency, zero hidden runtime overhead,
 and explicit memory boundaries. Concurrency is built on a small set of
@@ -1567,57 +1605,6 @@ let d = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
 
 ---
 
-## 41. The `process` Execution Model
-
-### How It Works: Binary Re-Entry via Channel ID
-
-When the compiler sees `process somefunc()`, it:
-
-1. Allocates a ring buffer channel with a **compile-time-stable ID** (derived from the call site).
-2. Re-executes the current binary via `execve`/`CreateProcess`, passing only two flags — the function to run and the channel to connect to.
-3. The child reconnects to that ring buffer by ID, runs its function, sends its result, and exits.
-
-```
-# normal run
-./main
-
-# compiler-spawned child
-./main --process-func some_func_ab3f2 --channel-id 234234978
-```
-
-No argument serialization. No `argv` blobs. The channel ID is the entire
-handshake — both sides already know its type from the compiled binary.
-
-### The Generated Entrypoint Switch
-
-```c
-int main(int argc, char** argv) {
-
-    /* ── compiler-generated process dispatch ── always runs first ── */
-    if (argc >= 5 && strcmp(argv[1], "--process-func") == 0
-                  && strcmp(argv[3], "--channel-id")   == 0) {
-
-        const char* func_id = argv[2];
-        const char* chan_id  = argv[4];
-
-        if (strcmp(func_id, "some_func_ab3f2") == 0) {
-            _vtx_proc_some_func(chan_id);   /* connect to ring buffer, run, exit */
-            return 0;
-        }
-        if (strcmp(func_id, "crunch_data_7b812") == 0) {
-            _vtx_proc_crunch_data(chan_id);
-            return 0;
-        }
-
-        fprintf(stderr, "vertex: unknown process func: %s\n", func_id);
-        return 1;
-    }
-
-    /* ── normal main() body ── never reached by child ── */
-    ...
-}
-```
-
 ### What the Channel ID Is
 
 The channel ID is a compile-time integer lowered at the call site — stable
@@ -1637,7 +1624,7 @@ let val    = result.receive()
 // 3. block on ring buffer receive
 
 // child side — compiler-generated wrapper:
-// _vtx_proc_some_func(chan_id):
+// proc_some_func(chan_id):
 //     ch = ringbuf_open(chan_id)   // reconnect to parent's buffer by ID
 //     ch.send(somefunc())          // run, write result
 //     exit(0)
@@ -1963,21 +1950,6 @@ async func(s: state WorkerState) {
         runtime.exit(0)
     }
 }(snap)
-```
-
-```vertex
-// what the compiler emits
-async {
-    let __ch = WorkerState.subscribe()
-    while true {
-        let s = __ch.receive()
-        io.printf("count: %d  msg: %s\n", s.count, s.message)
-
-        if s.done {
-            runtime.exit(0)
-        }
-    }
-}
 ```
 
 The `async` prefix (§40) confirms the effect runs on the **main thread event
@@ -2347,67 +2319,3 @@ func test_add() test -> Expected(int32, "15") {
 * **Auto-Printing**: Returning a value inside a test function causes that value to be auto-formatted and written to `stdout` before exiting.
 * **Compile-Time Only**: `Expected` is a compile-time metadata annotation; it does not affect standard type checking.
 * **File Scoping**: `test`-qualified functions are only valid in files tagged `build test`. Declaring a `test` function elsewhere is a compile error.
-
----
-
-## Explicitly Out of Scope in 2.2
-
-| Feature                                           | Status                                  |
-|---------------------------------------------------|-----------------------------------------|
-| Inheritance                                       | Removed                                 |
-| String interpolation `\()`                        | Removed                                 |
-| `_` parameter labels                              | Removed                                 |
-| `self` as implicit keyword or reserved identifier | Removed                                 |
-| `static` keyword                                  | Removed                                 |
-| Methods inside structs or classes                 | Removed                                 |
-| `mutating` keyword                                | Removed                                 |
-| `mut` parameter/receiver keyword                  | Removed — replaced by `*T` pointer syntax |
-| Protocols                                         | Removed                                 |
-| Extensions                                        | Removed                                 |
-| `try` / `throws` / `do-catch`                    | Removed                                 |
-| Nested structs or classes                         | Removed                                 |
-| `async`/`thread`/`process`/`gpu` as function qualifiers | Removed — replaced by call-site prefix sigils (§40) |
-| `.await()` / `.spawn()` / `.fork()` / `.dispatch()` postfixes | Removed — replaced by prefix sigils (§40) |
-| `.channel()` postfix construction                 | Removed — replaced by `{}` / `{cap: N}` brace initialization (§43.1) |
-| Generic constraints (`where T:`)                  | Deferred                                |
-| Closures                                          | §36                                     |
-| Enums with associated values                      | Deferred                                |
-| Access control                                    | Deferred                                |
-| Pattern matching beyond `if let` and `switch`     | Deferred                                |
-| Custom operators                                  | Deferred                                |
-| `async let` / `TaskGroup` concurrency             | Deferred                                |
-| `actor` keyword                                   | Deferred — see `state` (§45) for the broadcast-reactive alternative |
-| Conditional build expressions                     | Deferred                                |
-| Import aliasing                                   | Deferred                                |
-| Mixed tuple element labels                        | Deferred                                |
-| Tuple `for`-loop destructuring                    | Deferred                                |
-| `inout` tuple parameters                          | Deferred                                |
-| Tuple splat into function arguments               | Deferred                                |
-| `Err` value binding in `if let` else branch       | Deferred                                |
-| `weak` in manual class instances                  | Deferred                                |
-| Labeled `break` / `continue`                      | Deferred                                |
-
----
-
-## Summary of Changes from 2.1
-
-* **Execution model rewritten**: `async`/`thread`/`process`/`gpu` are no longer
-  function-declaration qualifiers with `.await()`/`.spawn()`/`.fork()`/`.dispatch()`
-  postfixes. They are now mutually exclusive **prefix sigils** applied to a call
-  expression (§39–§40).
-* **`gpu` now supports grid/block control** via `gpu(blocks: n, threads: n)`
-  (previously deferred).
-* **Channels are now declared with brace literals** (`{}` / `{cap: N}`) instead
-  of the `.channel()` / `.channel(size: n)` postfix intrinsic (§43.1).
-* **New Channel Dichotomy** (§42): functions returning `-> T` are
-  auto-channeled (single-return); functions returning `void` use explicit
-  stream channels.
-* **New `select` block** (§44) for zero-CPU multiplexing across channels —
-  previously deferred, now specified alongside the existing polling pattern.
-* **New `state` keyword and Async State Effects** (§45–§46): a broadcast
-  reactive primitive built on `chan T`, with `state T` parameters on `async`
-  functions auto-generating subscribe/loop/receive machinery.
-* **Tuples** (§37) now documented as carrying over channels (`chan (T, bool)`)
-  for value/validity-flag patterns used with `select`.
-* The `test` qualifier (§53) is unaffected — it remains a declaration-site
-  qualifier, distinct from the new call-site execution sigils.
