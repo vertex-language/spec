@@ -531,7 +531,7 @@ increment(n: &count)   // count is now 1
 
 **Execution strategy:**
 
-Vertex has no `async`, `thread`, `process`, or `gpu` *function qualifiers*.
+Vertex has no `async`, `thread`, or `gpu` *function qualifiers*.
 Every function is written as a single, ordinary, synchronous function — business
 logic is completely decoupled from execution strategy. The caller decides how a
 given call is executed by prefixing the call expression with an execution sigil
@@ -1397,7 +1397,7 @@ let result = thread func(seed: int32) -> float32 {
 }(105)
 ```
 
-See §39–§40 for the execution sigils (`async`, `thread`, `process`, `gpu`) and
+See §39–§40 for the execution sigils (`async`, `thread`, `gpu`) and
 §44 for the single-return vs. stream channel pattern this produces.
 
 ---
@@ -1558,120 +1558,49 @@ func process(s: string) -> Result(int32, string) {
 
 # Concurrency Architecture
 
-Vertex prioritizes absolute hardware transparency, zero hidden runtime overhead,
-and explicit memory boundaries. Concurrency is built on a small set of
-orthogonal primitives — execution sigils, channels, and broadcast state — rather
-than a bundled runtime or a separate `Promise`/`Future`/`actor` type system.
+Vertex prioritizes absolute hardware transparency, zero hidden runtime overhead, and explicit memory boundaries. Concurrency is built on a small set of orthogonal primitives — execution sigils, channels, and broadcast state — rather than a bundled runtime or a separate `Promise`/`Future`/`actor` type system.
 
 ## 39. The Execution Reality Map
 
-Vertex completely decouples *business logic* from *execution strategy*. The
-developer writes standard functions (§22), and the caller dictates the
-execution context using prefix sigils at the call site.
+Vertex completely decouples *business logic* from *execution strategy*. The developer writes standard functions (§22), and the caller dictates the execution context using prefix sigils at the call site.
 
-| Prefix Sigil | The Vertex Abstraction | The C/OS Reality Under the Hood | Best For |
+| Prefix Sigil | The Vertex Abstraction | The Reality Under the Hood | Best For |
 | --- | --- | --- | --- |
-| `thread` | Shared-memory concurrency | Spawns a real OS thread (`pthread_create`). Has a full 2MB+ OS stack. | Heavy CPU work, blocking C-library calls, `time.sleep()`. |
-| `process` | Isolated-memory concurrency | Re-executes the **current binary** via `execve`/`CreateProcess` with `--process-func <id> --channel-id <id>`. The child reconnects to a compile-time ring buffer by channel ID, runs its function, sends its result, and exits. No `fork()` — fully cross-platform. | Sandboxing unsafe code, multi-socket CPU systems. |
-| `async` | Non-blocking event loop | **Zero threads spawned.** Compiler rewrites the function into a State Machine (C `struct` + `switch`). Runs cooperatively on the Main Thread via `epoll`/`kqueue`. | Millions of idle network connections, UI thread tasks, state effects. |
+| `thread` | Shared-memory concurrency | Spawns a real OS thread (`thread.new`). Has a full 2MB+ OS stack. | Heavy CPU work, blocking C-library calls, CPU-pinned parallelism. |
+| `async` | Lightweight virtual thread | Spawns a virtual thread (`vthread.new`). Kilobyte-scale stack multiplexed many-to-few onto backend carrier threads. Context-switched in userspace. | Millions of idle network connections, massive fan-out state effects, non-blocking I/O. |
 | `gpu` | Hardware acceleration | Compiles to PTX/SPIR-V. CPU executes `dlopen` to the CUDA/Metal driver and dispatches the kernel asynchronously. | Massive matrix math, AI inference. |
 
 ---
 
 ## 40. Execution Modifiers (Prefix Sigils)
 
-Execution modifiers are applied directly at the call site, providing immediate
-visual clarity regarding memory boundaries and execution contexts.
+Execution modifiers are applied directly at the call site, providing immediate visual clarity regarding memory boundaries and execution contexts.
 
 ```vertex
 let a = async fetch_network(id: 1)
 let b = thread heavy_compute(data: x)
-let c = process isolated_task()
 
 // GPU requires hardware configuration (blocks/threads)
 let d = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
+
 ```
 
 **Rules:**
 
-* The four sigils — `async`, `thread`, `process`, `gpu` — are mutually
-  exclusive prefixes on a call expression, not function qualifiers.
-* `gpu` accepts an optional configuration list `(blocks: n, threads: n)`
-  controlling grid/block dispatch.
-* The same function, written once with no qualifier, may be called with any of
-  the four sigils at different call sites.
-* Calls returning a value (`-> T`) become channel-returning expressions — see
-  §44, The Channel Dichotomy.
-
----
-
-### What the Channel ID Is
-
-The channel ID is a compile-time integer lowered at the call site — stable
-across runs as long as the function signature doesn't change. The parent
-creates the ring buffer before spawning; the child opens it by that same ID. No
-negotiation at runtime.
-
-```vertex
-// what the developer writes
-let result = process somefunc()
-let val    = result.receive()
-
-// what the compiler lowers (parent side):
-// 1. allocate ring buffer, id = 234234978  ← compile-time constant
-// 2. execve("./main", ["--process-func", "some_func_ab3f2",
-//                      "--channel-id",   "234234978"])
-// 3. block on ring buffer receive
-
-// child side — compiler-generated wrapper:
-// proc_some_func(chan_id):
-//     ch = ringbuf_open(chan_id)   // reconnect to parent's buffer by ID
-//     ch.send(somefunc())          // run, write result
-//     exit(0)
-```
-
-### What the Child Does and Does Not Run
-
-| Runs in child | Does NOT run in child |
-|---|---|
-| Compiler dispatch preamble | `main()` body |
-| Target function | Any `state` subscriptions from `main()` |
-| Ring buffer write + `exit(0)` | `runtime.loop()` |
-| | Any `async` effects registered in `main()` |
-
-This guarantees zero cross-contamination between the parent's event loop and the
-child's isolated execution.
-
-### Runtime Transport by Context
-
-The `chan T` primitive (§43) is unified across all execution contexts. The
-underlying transport is swapped out by the compiler based on which prefix sigil
-is in use:
-
-| Context | Transport | Reason |
-|---|---|---|
-| `async` | Shared memory, non-blocking | Same thread — state machine resumes in place |
-| `thread` | Shared memory, lightweight | Same address space — direct queue hand-off |
-| `process` | Ring buffer, high-speed IPC | Separate address space — ring buffer opened by ID on both sides |
-
-The call site looks identical in all three cases. The channel ID mechanism is
-what lets `process` match that interface without any special serialization
-protocol.
+* The three sigils — `async`, `thread`, `gpu` — are mutually exclusive prefixes on a call expression, not function qualifiers.
+* `gpu` accepts an optional configuration list `(blocks: n, threads: n)` controlling grid/block dispatch.
+* The same function, written once with no qualifier, may be called with any of the three sigils at different call sites.
+* Calls returning a value (`-> T`) become channel-returning expressions — see §42, The Channel Dichotomy.
 
 ---
 
 ## 42. The Channel Dichotomy: Single-Return vs. Streams
 
-Vertex eliminates the need for separate `Promise` or `Future` types. All
-cross-boundary communication happens via channels (`chan T`, §43). The compiler
-enforces a strict two-path rule based on the function's return type.
+Vertex eliminates the need for separate `Promise` or `Future` types. All cross-boundary communication happens via channels (`chan T`, §43). The compiler enforces a strict two-path rule based on the function's return type.
 
 ### Path A: The Single-Return (Auto-Channeling)
 
-If a function returns a value (`-> T`), the compiler assumes it is a one-off
-computation. It automatically generates a 1-capacity channel, injects `.send()`
-and `.close()` into the generated C wrapper, and returns the channel to the
-caller.
+If a function returns a value (`-> T`), the compiler assumes it is a one-off computation. It automatically generates a 1-capacity channel, injects `.send()` and `.close()` into the generated C wrapper, and returns the channel to the caller.
 
 ```vertex
 let worker = thread func(seed: int32) -> float32 {
@@ -1679,14 +1608,12 @@ let worker = thread func(seed: int32) -> float32 {
 }(105)
 
 let final_data = worker.receive()
+
 ```
 
 ### Path B: The Stream (Explicit Channels)
 
-If a function returns nothing (`void` / `()`), the compiler assumes it is a
-long-running daemon or stream. The developer explicitly allocates and passes
-channels as parameters, retaining full control over buffer capacity and
-multi-channel pipelines.
+If a function returns nothing (`void` / `()`), the compiler assumes it is a long-running daemon or stream. The developer explicitly allocates and passes channels as parameters, retaining full control over buffer capacity and multi-channel pipelines.
 
 ```vertex
 let out_stream: chan float32 = {cap: 64}
@@ -1701,6 +1628,7 @@ thread func(data: [float32], ch: chan float32) {
 while let chunk = out_stream.tryReceive() {
     print(chunk)
 }
+
 ```
 
 ---
@@ -1709,9 +1637,7 @@ while let chunk = out_stream.tryReceive() {
 
 ### 43.1 Channel Initialization
 
-A channel is declared with an explicit type annotation and initialized with a
-brace literal. An empty brace `{}` produces an unbuffered channel. `{cap: N}`
-produces a buffered channel with capacity `N`.
+A channel is declared with an explicit type annotation and initialized with a brace literal. An empty brace `{}` produces an unbuffered channel. `{cap: N}` produces a buffered channel with capacity `N`.
 
 ```vertex
 // unbuffered — blocks on send until receiver is ready
@@ -1722,22 +1648,19 @@ let ch2: chan int32 = {cap: 64}
 
 // pointer type — type annotation left, initializer right, no ambiguity
 let ch3: chan *const char = {cap: 32}
+
 ```
 
 **Rules:**
 
-* The type annotation is required — the element type cannot be inferred from
-  `{}` alone.
+* The type annotation is required — the element type cannot be inferred from `{}` alone.
 * `{}` declares an unbuffered channel. Send blocks until a receiver is ready.
-* `{cap: N}` declares a buffered channel. Send blocks only when the buffer is
-  full.
+* `{cap: N}` declares a buffered channel. Send blocks only when the buffer is full.
 * `N` must be a compile-time integer literal greater than zero.
 
 ### 43.2 Channel API
 
-All channel operations are method calls. There is no operator syntax. This
-keeps one consistent style across the entire channel primitive regardless of
-whether the operation is blocking, non-blocking, or closing.
+All channel operations are method calls. There is no operator syntax. This keeps one consistent style across the entire channel primitive regardless of whether the operation is blocking, non-blocking, or closing.
 
 ```vertex
 ch.send(val)          // blocking send — waits if buffer is full
@@ -1745,7 +1668,7 @@ ch.receive()          // blocking receive — waits until a value arrives
 ch.trySend(val)       // non-blocking send — returns bool, false if full
 ch.tryReceive()       // non-blocking receive — returns immediately
 ch.close()            // closes the channel, signals no more values
-ch.subscribe()        // returns a new personal chan T for broadcast state
+
 ```
 
 `tryReceive()` returns an optional, allowing clean `if let` handling:
@@ -1754,91 +1677,81 @@ ch.subscribe()        // returns a new personal chan T for broadcast state
 if let val = ch.tryReceive() {
     print(val)
 }
+
 ```
 
 **Operation summary:**
 
-| Method          | Blocking | Returns  | Behaviour                            |
-|-----------------|----------|----------|---------------------------------------|
-| `.send(value)`  | yes      | `void`   | waits until value is accepted          |
-| `.receive()`    | yes      | `T`      | waits until value is available         |
-| `.trySend(v)`   | no       | `bool`   | false if full or no receiver ready     |
-| `.tryReceive()` | no       | `T?`     | nil if channel is empty                |
-| `.close()`      | no       | `void`   | always completes immediately           |
-| `.subscribe()`  | no       | `chan T` | new personal channel for broadcast state |
+| Method | Blocking | Returns | Behaviour |
+| --- | --- | --- | --- |
+| `.send(value)` | yes | `void` | waits until value is accepted |
+| `.receive()` | yes | `T` | waits until value is available |
+| `.trySend(v)` | no | `bool` | false if full or no receiver ready |
+| `.tryReceive()` | no | `T?` | nil if channel is empty |
+| `.close()` | no | `void` | always completes immediately |
 
 **Rules:**
 
-* `.send()` blocks when the buffer is full or the channel is unbuffered and no
-  receiver is ready.
+* `.send()` blocks when the buffer is full or the channel is unbuffered and no receiver is ready.
 * `.receive()` blocks until a value is available.
-* `.trySend()` returns `false` immediately if the channel cannot accept the
-  value — it never blocks.
-* `.tryReceive()` returns `nil` immediately if no value is available — it never
-  blocks.
+* `.trySend()` returns `false` immediately if the channel cannot accept the value — it never blocks.
+* `.tryReceive()` returns `nil` immediately if no value is available — it never blocks.
 * `.send()` or `.trySend()` on a closed channel is a runtime error.
 * `.receive()` or `.tryReceive()` on a closed, empty channel is a runtime error.
 * `.close()` always completes immediately.
-* `.subscribe()` is most commonly used with `state` (§46) — each subscriber
-  receives its own `chan T` and sees every broadcast.
-* Runtime transport (shared memory vs. ring buffer) varies by execution context
-  — see §41, Runtime Transport by Context.
 
 ---
 
 ## 44. Multiplexing (`select` and Polling)
 
-Because all execution contexts communicate via the same `chan T` primitive,
-they can be multiplexed universally.
+Because all execution contexts communicate via the same `chan T` primitive, they can be multiplexed universally.
 
 **Method A: The Polling Loop (Non-Blocking)**
 
 For systems programming requiring tight control over CPU yielding:
 
 ```vertex
-let task1 = process crunch_data()
+let task1 = thread crunch_data()
 let task2 = thread fetch_network()
 
 var waiting = true
 while waiting {
     if let a = task1.tryReceive() {
-        print("Process won")
+        print("Task 1 done")
         waiting = false
     } else if let b = task2.tryReceive() {
-        print("Thread won")
+        print("Task 2 done")
         waiting = false
     } else {
         runtime.yield()
     }
 }
+
 ```
 
 **Method B: The `select` Block (Zero-CPU Sleeping)**
 
-For high-performance multiplexing. The `select` block safely suspends the
-thread (0% CPU) until a channel is ready.
+For high-performance multiplexing. The `select` block safely suspends the thread (0% CPU) until a channel is ready.
 
 ```vertex
 select {
 case a = task1.receive():
-    print("Process won")
+    print("Task 1 done")
 case b = task2.receive():
-    print("Thread won")
+    print("Task 2 done")
 default:
     // adding 'default' makes the select instantly non-blocking
     print("Doing other work...")
 }
+
 ```
 
 **Rules:**
 
-* `select` evaluates each `case`'s `.receive()` concurrently and runs the body
-  of whichever channel becomes ready first.
-* An optional `default` case makes the entire `select` non-blocking — if no
-  channel is ready immediately, `default` runs instead.
+* `select` evaluates each `case`'s `.receive()` concurrently and runs the body of whichever channel becomes ready first.
+* An optional `default` case makes the entire `select` non-blocking — if no channel is ready immediately, `default` runs instead.
 * Without `default`, `select` suspends with 0% CPU usage until a case is ready.
-* `case` bindings (e.g. `a = task1.receive()`) are scoped to that case's body
-  only.
+* `case` bindings (e.g. `a = task1.receive()`) are scoped to that case's body only.
 
 ---
 
@@ -1846,81 +1759,52 @@ default:
 
 ### Philosophy
 
-Vertex's `state` keyword declares a **reactive broadcast primitive**. It is the
-one additional concept built on top of `chan T`, covering the case where
-multiple subscribers need the same current value simultaneously.
+Vertex's `state` keyword is a **type modifier** that wraps any value type in a reactive broadcast primitive. It is built directly on top of the underlying Virtual IR `pub`/`sub` instructions.
 
 ```
 chan T    →  point-to-point, FIFO, one consumer per message
-state T  →  broadcast, current value, many subscribers, module-owned
+state T   →  broadcast (pub/sub), lossy-latest, many subscribers
+
 ```
 
-Under the hood, `state` allocates a value store and a fan-out mechanism. When
-`setState` is called, the new value is stored and sent to every subscriber's
-individual `chan T` (via `.subscribe()`, §43.2). No subscriber competes with
-another. Every subscriber sees every update.
+Because `state` is a type modifier, you can wrap any type: a scalar, a tuple, or a standard `struct`. You are not restricted to defining magical top-level objects.
 
-### Declaration
+### Declaration and Initialization
 
-State is always declared using the inline struct form at **package level** in
-its own module file. Every field carries a default value. The `state` keyword
-is reserved.
+Declare state exactly like a channel, using a type annotation and a brace initializer containing the initial value.
 
 ```vertex
-// package appstate
-state WorkerState {
-    count:   int32       = 0
-    message: *const char = ""
-    done:    bool        = false
+// state over a scalar
+let isDone: state bool = {false}
+
+// state over a struct
+struct WorkerState {
+    count:   int32
+    message: string
+    done:    bool
 }
+
+// initialization requires the starting value inside braces
+let appState: state WorkerState = { WorkerState{count: 0, message: "idle", done: false} }
+
 ```
 
-### Consuming State
+### The State API
 
-Calling the state by name returns a `(snap, setState)` tuple (§37). `snap` is a
-reactive handle typed `state WorkerState` — field access works transparently
-through it. The developer names both sides freely.
+A `state T` handle provides a simple method API that maps directly to the underlying `pub` and `sub` IR instructions.
 
 ```vertex
-import "github.com/youruser/appstate"
+appState.set(newValue)    // overwrites the current value and broadcasts to all subscribers
+let snap = appState.get() // returns a snapshot of the current value without subscribing
 
-let (snap, setState) = appstate.WorkerState()
-
-// snap      — current value at time of subscription
-// setState  — broadcasts a new value to all subscribers
-
-snap.count
-snap.message
-snap.done
-```
-
-### Updating State
-
-`setState` takes a full struct literal. Partial updates are not supported — the
-compiler enforces that all fields are present, so adding a field to the state
-definition produces a compile error at every call site.
-
-```vertex
-setState(WorkerState{ count: 1, message: "processing", done: false })
-```
-
-Named parameters are also valid:
-
-```vertex
-setState(count: 1, message: "processing", done: false)
 ```
 
 **Rules:**
 
-* `state` declarations may appear at package level only, in their own module
-  file.
-* Every field of a `state` struct must declare a default value.
-* Calling the state's name returns `(snap, setState)` — a tuple (§37).
-* `setState` requires every field to be present in each call — partial updates
-  are a compile error.
-* Every subscriber's `chan T` (obtained explicitly via `.subscribe()`, or
-  implicitly via an `async` effect, §46) receives every broadcast — no
-  competition between subscribers.
+* `state T` can wrap any valid value type (scalar, struct, tuple, pointer).
+* Initialization requires a brace block containing the initial value: `{initialValue}`.
+* `.set(val)` replaces the current value and broadcasts it to all subscribers. Delivery is lossy-latest; it never blocks the caller.
+* `.get()` reads the current value synchronously without advancing any subscriber cursors.
 
 ---
 
@@ -1928,59 +1812,48 @@ setState(count: 1, message: "processing", done: false)
 
 ### The Problem
 
-Subscribing to state changes by hand requires calling `.subscribe()`, entering a
-`while true` loop, and calling `.receive()` on every iteration. Writing this for
-every state listener is boilerplate.
+Subscribing to state changes by hand requires allocating a subscriber endpoint, entering a `while true` loop, and calling receive on every iteration. Writing this for every state listener is boilerplate.
 
 ### The Solution: `state T` Parameters
 
-When an `async` function declares a parameter with type `state T`, the compiler
-automatically generates the subscribe, loop, and receive machinery. The
-developer passes `snap` at the call site — its type `state T` is the signal the
-compiler uses to wire up the subscription.
+When an `async` function declares a parameter with type `state T`, the compiler automatically generates the subscriber endpoint, the loop, and the receive machinery.
 
 ```vertex
-let (snap, setState) = WorkerState()
+let appState: state WorkerState = { WorkerState{count: 0, message: "idle", done: false} }
 
 // what the developer writes
 async func(s: state WorkerState) {
-    io.printf("count: %d  msg: %s\n", s.count, s.message)
+    let current = s.get()
+    io.printf("count: %d  msg: %s\n", current.count, current.message)
 
-    if s.done {
+    if current.done {
         runtime.exit(0)
     }
-}(snap)
+}(appState)
+
 ```
 
-The `async` prefix (§40) confirms the effect runs on the **main thread event
-loop** — safe for UI updates, zero additional threads spawned.
+The `async` prefix (§40) confirms the effect runs on a **virtual thread** — cheap to spawn, safely suspending and yielding its carrier thread whenever it waits for the next broadcast.
 
 Multiple `state T` parameters subscribe to all of them simultaneously:
 
 ```vertex
-let (workerSnap, setWorker) = WorkerState()
-let (cfgSnap, setCfg)       = AppConfig()
-
 async func(s: state WorkerState, cfg: state AppConfig) {
-    if s.done && cfg.verbose {
-        io.printf("finished: %d iterations\n", s.count)
+    if s.get().done && cfg.get().verbose {
+        io.printf("finished: %d iterations\n", s.get().count)
     }
-}(workerSnap, cfgSnap)
+}(appState, configState)
+
 ```
 
-No `effect` keyword. No dependency arrays. The `state T` parameter type is the
-complete signal to the compiler.
+No `effect` keyword. No dependency arrays. The `state T` parameter type is the complete signal to the compiler to generate the reactive boundary.
 
 **Rules:**
 
-* `state T` is a valid parameter type only on `async`-invoked anonymous or named
-  functions (§40).
-* Each `state T` parameter generates an independent `.subscribe()` + `while
-  true { .receive() }` loop at compile time.
-* The parameter binding (e.g. `s`) is updated to the latest broadcast value on
-  every iteration.
-* The function body runs on the main thread event loop on every broadcast from
-  any subscribed state.
+* `state T` is a valid parameter type only on `async`-invoked anonymous or named functions (§40).
+* Each `state T` parameter generates an independent subscription and `while true { receive() }` loop at compile time.
+* Inside the function body, calling `.get()` on the parameter yields the updated value for that iteration.
+* The function body runs on a virtual thread, waking seamlessly on every broadcast from any subscribed state.
 
 ---
 
@@ -1991,89 +1864,52 @@ package main
 
 import "std/io"
 
-state WorkerState {
-    count:   int32       = 0
-    message: *const char = ""
-    done:    bool        = false
+struct WorkerState {
+    count:   int32
+    message: string
+    done:    bool
 }
 
 // runs on its own OS thread
-// only receives the setter — never touches the event loop
-func worker(set: func(WorkerState)) {
+// receives the state handle directly, never touches the event loop
+func worker(st: state WorkerState) {
     var i: int32 = 0
     while i < 5 {
         i = i + 1
-        set(WorkerState{ count: i, message: "processing...", done: false })
+        st.set(WorkerState{ count: i, message: "processing...", done: false })
     }
-    set(WorkerState{ count: 5, message: "all done!", done: true })
+    st.set(WorkerState{ count: 5, message: "all done!", done: true })
 }
 
 func main() -> int {
-    let (snap, setState) = WorkerState()
+    // initialize state over our struct
+    let appState: state WorkerState = { WorkerState{count: 0, message: "idle", done: false} }
 
-    io.printf("initial count: %d\n", snap.count)
+    io.printf("initial count: %d\n", appState.get().count)
 
-    // thread broadcasts state changes — isolated, no event loop involvement
-    thread worker(setState)
+    // thread broadcasts state changes — heavy CPU work stays isolated
+    thread worker(appState)
 
-    // async effect — pass snap, compiler generates subscribe + while + receive
-    // runs on main thread event loop, wakes on every broadcast
-    async func(s: state WorkerState) {
-        io.printf("count: %d  msg: %s\n", s.count, s.message)
+    // async effect — runs on a virtual thread, wakes on every broadcast
+    async func(st: state WorkerState) {
+        let current = st.get()
+        io.printf("count: %d  msg: %s\n", current.count, current.message)
 
-        if s.done {
+        if current.done {
             io.printf("thread finished\n")
             runtime.exit(0)
         }
-    }(snap)
+    }(appState)
 
     runtime.loop()
     return 0
 }
-```
 
-**Data flow:**
-
-```
-thread worker()
-    → setState(WorkerState{...})        // writes value, fans out via chan
-        → async effect receives update  // compiler-generated receive()
-            → body runs on main loop    // safe, no races, no locks
 ```
 
 ---
 
-## 48. Architectural Philosophy: Why State Machines for `async`?
-
-Vertex strictly rejects the Green Thread model for `async` in favor of
-**Compile-Time State Machines** (Rust/C++ style).
-
-### The Flaws of Green Threads
-
-1. **Hidden Runtime:** Green threads require a massive bundled scheduler for
-   preemptive context switching and timer queues.
-2. **Stack Memory Bloat:** Every green thread needs a fake stack (2KB+ minimum).
-   10,000 idle websocket connections = 20MB+ RAM.
-3. **The UI Problem:** Graphical OS frameworks crash if UI updates happen off the
-   Main Thread. Green thread schedulers hop between cores unpredictably.
-
-### The Vertex Solution
-
-When you apply `async`, the compiler shreds the function into a C `struct`
-(holding local variables) and a `switch` statement.
-
-- **Tiny Memory:** A state machine consumes only the exact bytes needed for its
-  local variables (< 64 bytes typically), allowing millions of concurrent tasks
-  with near-zero RAM footprint.
-- **C-Native:** Uses the standard OS thread stack when executing, unwinds
-  completely when yielding.
-- **UI Perfect:** `async` tasks run cooperatively on the single Main Thread.
-  When a network call or state broadcast arrives, the state machine resumes
-  directly on the Main Thread — 100% safe for native UI updates.
-
----
-
-## 49. Native Interface
+## 48. Native Interface
 
 ```vertex
 package windows_d3d11
@@ -2106,7 +1942,7 @@ class ID3D11Device : IUnknown {
 
 ---
 
-## 50. Build Tags
+## 49. Build Tags
 
 ```vertex
 package mypackage
@@ -2114,9 +1950,6 @@ build amd64
 
 package mypackage
 build windows
-
-package mypackage
-build intrinsics_amd64
 ```
 
 **Rules:**
@@ -2128,15 +1961,13 @@ build intrinsics_amd64
   any `import` declarations.
 * The recognised architecture tags are `amd64` and `arm64`. The compiler
   selects exactly one architecture tag per target.
-* The recognised layer tags are `intrinsics`, `builtin`, and `core`. These
-  control import access enforcement (§53).
 * Arbitrary platform tags (e.g. `windows`) are valid and may be defined by
   the build system.
 * A file with no `build` tag is compiled unconditionally on all targets.
 
 ---
 
-## 51. Package Declarations
+## 50. Package Declarations
 
 ```vertex
 package memory
@@ -2157,106 +1988,13 @@ package windows_d3d11
 
 ---
 
-## 52. Inline Assembly
+## 51. Compiler Testing
 
-`asm()` is valid only inside a `build intrinsics` function body. It is a
-compile error anywhere else in the language.
-
-**Void form — no return value:**
-
-```vertex
-func fence() {
-    asm("mfence")
-}
-```
-
-**Return form — maps output registers to the return type:**
-
-```vertex
-func load32(addr: *uint32) -> uint32 {
-    return asm(
-        "mov eax, [rdi]",
-        "mfence",
-        in("rdi") addr,
-        out("eax")
-    )
-}
-```
-
-**Tuple return — multiple output-producing constraints:**
-
-```vertex
-func add32(a: uint32, b: uint32) -> (uint32, bool) {
-    return asm(
-        "add eax, ecx",
-        inout("eax") a,
-        in("ecx") b,
-        out("cf")
-    )
-}
-```
-
-**Operand declarations:**
-
-```vertex
-in("register") param          // register is loaded with param before execution
-inout("register") param       // register is seeded with param on entry;
-                              // its exit value contributes to the return
-out("register")               // register's exit value contributes to the return;
-                              // undefined on entry
-clobber("reg", "reg", ...)    // registers are trashed — not inputs or outputs
-```
-
-**Special register tokens** — valid in `out` and `clobber` only:
-
-| Token     | Meaning           |
-|-----------|-------------------|
-| `"cf"`    | carry flag        |
-| `"zf"`    | zero flag         |
-| `"sf"`    | sign flag         |
-| `"of"`    | overflow flag     |
-| `"flags"` | all condition flags |
-
-**Rules:**
-
-* Instruction strings are passed verbatim to the backend assembler. AMD64 uses
-  Intel syntax (`dest, src`; no `%` or `$` prefixes). ARM64 uses standard
-  AArch64 syntax (`dest, src1, src2`).
-* A function body inside a `build intrinsics` package must consist of exactly
-  one `asm()` expression. No other statements may appear alongside it.
-* Output-producing constraints — `inout` and `out` — contribute to the return
-  tuple in declaration order. `in` and `clobber` do not contribute to the return
-  regardless of position.
-* `inout` declares a register that is live both on entry and exit. It is
-  self-contained: no separate `out` for the same register is permitted.
-* The `in` + `clobber` pattern on the same register is valid only when an
-  instruction both reads the register as input and unconditionally destroys it
-  (e.g. `cmpxchg` consuming `eax`). The emitter converts this to a discarded
-  inout in the backend.
-* `in("xN") addr` paired with `out("wN")` is valid when the same physical
-  register is used at different widths across the boundary (e.g. 64-bit address
-  in, 32-bit result out on ARM64). Use `inout` when the width is identical.
-* All `asm()` blocks are implicitly non-eliminatable — the backend never
-  optimises across an `asm` boundary and never removes an `asm` block as dead
-  code.
-* `clobber` registers must not appear in `in`, `inout`, or `out`, except for
-  the `in` + `clobber` pattern described above.
-* Only packages tagged `build builtin` or `build core` may import
-  `intrinsics/*`. Any other import of an intrinsics package is a hard compiler
-  error.
-* Two functions — `likely` and `unlikely` (§`intrinsics/hint`) — are
-  compiler-resolved hints. They carry no `asm()` body; the backend emits branch
-  weight metadata directly. Declaring a body for them is a compile error.
-
----
-
-## 53. Compiler Testing
-
-### 53.1 The `test` Qualifier
+### 51.1 The `test` Qualifier
 
 `test` is a function qualifier. It occupies the same position as the legacy
 qualifier slot between the parameter list and the return arrow. Unlike
-`async`/`thread`/`process`/`gpu` (which are now call-site sigils, §40), `test`
+`async`/`thread`/`gpu` (which are now call-site sigils, §40), `test`
 remains a declaration-site qualifier — test functions are auto-discovered by the
 test runner and are never called directly from user code.
 
@@ -2271,7 +2009,7 @@ func test_comparison() test -> Expected(bool, "1")   { return 5 > 3 }
 func test_no_crash()   test                          { square(n: 0) }
 ```
 
-### 53.2 `Expected`
+### 51.2 `Expected`
 
 `Expected` is the return type annotation for test functions. It declares both the return type of the function and the exact string the test runner expects to capture from standard output (`stdout`).
 
@@ -2282,7 +2020,7 @@ Expected(type, string_literal)
 * **`type`**: The concrete return type of the test function. Must match the type of the value actually returned.
 * **`string_literal`**: The exact string the function's output must match to pass the test.
 
-### 53.3 Return Value Formatting
+### 51.3 Return Value Formatting
 
 When a test function returns a value, the compiler automatically emits a `printf` call to write the formatted value to `stdout` before the process exits. The format is fixed:
 
@@ -2297,7 +2035,7 @@ When a test function returns a value, the compiler automatically emits a `printf
 
 *(Note: The boolean format maps to the C backend's integer representation.)*
 
-### 53.4 `build test`
+### 51.4 `build test`
 
 Test files are identified by the `build test` tag. The compiler excludes them from normal builds and compiles them into standalone executables only when running in test mode.
 
