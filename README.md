@@ -1245,6 +1245,92 @@ defer b.delete()           // runs first
 
 ---
 
+## 32.1 Auto Binding Modifier
+
+`auto` is a binding modifier that instructs the compiler to automatically inject
+cleanup at scope exit. It eliminates the `defer x.delete()` boilerplate for the
+common case while leaving manual lifetime control available when needed.
+
+**Syntax:**
+
+```vertex
+auto let name = expression
+auto var name = expression
+```
+
+**How it works:**
+
+The compiler inspects the type of the binding at compile time and injects
+`.delete()` at scope exit. `auto` is only valid on class bindings — applying it
+to a scalar or plain struct is a compile error.
+
+Cleanup order follows LIFO — identical to how `defer` already behaves.
+
+**Classes — `delete` triggers `deinit`:**
+
+The injected `.delete()` call automatically triggers the class's `deinit` before
+freeing memory:
+
+```vertex
+class Logger {
+    path: string
+    file: File
+}
+
+func (l: Logger) deinit() {
+    l.file.flush()
+    l.file.close()
+}
+
+func runJob() {
+    auto let log = Logger(path: "job.log")
+    log.write("started")
+    // scope exits — .delete() fires — deinit runs — file flushed and closed
+}
+```
+
+The chain is always: `auto` scope exit → `.delete()` → `deinit()` → memory freed.
+
+**Example:**
+
+```vertex
+// before
+let log = Logger(path: "job.log")
+defer log.delete()
+let buf = Buffer(capacity: 4096)
+defer buf.delete()
+
+// after
+auto let log = Logger(path: "job.log")
+auto let buf = Buffer(capacity: 4096)
+```
+
+Same semantics, same LIFO teardown order.
+
+**Manual lifetime:**
+
+`auto` is opt-in. Drop it when you need explicit control — early release,
+conditional cleanup, or ownership transfer:
+
+```vertex
+let conn = tcp.Client(address: "localhost", port: 8080)
+if shouldKeep {
+    cache.store(conn)    // transfer ownership elsewhere
+} else {
+    conn.delete()        // explicit early release
+}
+```
+
+**Binding summary:**
+
+| Binding | Lifetime |
+|---|---|
+| `let` / `var` | manual — you call `.delete()` |
+| `auto let` / `auto var` | automatic — compiler injects `.delete()` at scope exit |
+| `weak let` | non-owning — no cleanup, never owned |
+
+---
+
 ## 33. Generics (unconstrained)
 
 ```vertex
@@ -1476,7 +1562,37 @@ case (val, ok) = stream.receive():
 
 ## 38. Error Handling
 
-### 38.1 Optionals — absence without context
+Vertex error handling is built on plain tuples and `?` propagation. A function
+that can fail returns a tuple where the last element signals the outcome. There
+is no special error type — the last element is just a value, and the zero value
+for its type signals success.
+
+### 38.1 Convention
+
+The last element of a tuple return signals the outcome. Success is the zero
+value for that type — `false` for bool, `0` for integers, `""` for strings,
+`nil` for optionals, `.None` for enums. Any non-zero value is treated as failure
+by `?` and `else ->`.
+
+```vertex
+func parseInt(s: string) -> (int32, string) {
+    if s == "" { return (0, "empty string") }
+    return (42, "")
+}
+
+func connect(host: string, port: uint16) -> ((), bool) {
+    if host == "" { return ((), false) }
+    return ((), true)
+}
+```
+
+This is a convention, not a type constraint. The compiler does not restrict what
+type the last element is — it only needs to know the zero value for that type to
+evaluate `?` and `else ->`.
+
+### 38.2 Optionals — absence without context
+
+When there is no outcome to describe, return a plain optional instead of a tuple.
 
 ```vertex
 func findUser(id: int32) -> User? {
@@ -1488,71 +1604,85 @@ if let user = findUser(id: 1) { }
 let name = findUser(id: -1) ?? defaultUser
 ```
 
-### 38.2 Tuples — multiple returns, caller decides
+### 38.3 The Five Patterns
+
+**1 — Plain destructuring**
+
+The simplest form — unpack the tuple and handle it yourself.
 
 ```vertex
-func divide(a: int32, b: int32) -> (int32, string?) {
-    if b == 0 { return (0, "division by zero") }
-    return (a / b, nil)
-}
-
-let (result, err) = divide(a: 10, b: 0)
-if err != nil { }
-```
-
-### 38.3 Result — explicit Ok/Err
-
-```vertex
-func parseInt(s: string) -> Result(int32, string) {
-    if s == "" { return Result(Err, "empty string") }
-    return Result(Ok, 42)
+let (n, err) = parseInt(s: "42")
+if err != "" {
+    log.printf("failed: %s\n", err)
 }
 ```
 
-**Consuming with `if let`:**
+**2 — Propagate with `?`**
+
+Unwraps the value and propagates the last element up the call stack automatically
+if it is non-zero. Only valid inside a function that itself returns a tuple.
 
 ```vertex
-if let value = parseInt(s: "42") {
-    // value: int32
+let n = parseInt(s: s)?
+```
+
+**3 — Happy path only**
+
+```vertex
+if let n = parseInt(s: "42") {
+    // use n
 }
 ```
 
-**Consuming with `switch`:**
+**4 — Both paths — `else ->`**
+
+`else -> val` binds the last element of the tuple into the else block. The `->`
+mirrors the language's return arrow — the value is coming out to you.
 
 ```vertex
-switch parseInt(s: "42") {
-case Ok(let value):
-    // value: int32
-case Err(let err):
-    // err: string
+if let n = parseInt(s: "42") {
+    // use n
+} else -> err {
+    log.printf("failed: %s\n", err)
 }
 ```
 
-**Propagating with `.try()`:**
+**5 — Full control — `switch`**
+
+Destructure first, then switch on the element you want to inspect.
 
 ```vertex
-func process(s: string) -> Result(int32, string) {
-    let n = parseInt(s: s).try()
-    let d = divide(a: n, b: 2).try()
-    return Result(Ok, d)
+let (n, err) = parseInt(s: "42")
+switch err {
+case "":
+    // use n
+default:
+    // use err
 }
 ```
-
-**Rules:**
-
-* `Result(Ok, value)` and `Result(Err, error)` are the only valid construction
-  forms.
-* `if let` on a `Result` binds the `Ok` value only — use `switch` to inspect
-  `Err`.
-* `.try()` may only appear inside a function whose return type is `Result(T, E)`.
 
 ### 38.4 Choosing the Right Primitive
 
-| Situation                               | Use             |
-|-----------------------------------------|-----------------|
-| Value may simply not exist              | `T?`            |
-| Caller needs value and error together   | `(T, E?)` tuple |
-| Caller must handle Ok or Err explicitly | `Result(T, E)`  |
+| Situation | Use |
+|---|---|
+| Value may simply not exist | `T?` |
+| Handle it yourself | `let (val, err) = f()` |
+| Bubble the error up | `?` |
+| Happy path only | `if let` |
+| Inspect both paths | `else ->` on `if let` |
+| Full destructuring | `switch` |
+
+**Rules:**
+
+* `?` is valid on any call whose return type is a tuple.
+* `?` propagates when the last element is non-zero for its type — non-nil,
+  non-empty, non-false, non-`.None`, non-`0`.
+* `else -> name` on an `if let` block binds the last element of the tuple into
+  the else block.
+* `?` may only appear inside a function that itself returns a tuple — propagation
+  requires a matching shape at the call site.
+* The last element may be any type — the developer is responsible for following
+  the zero-value convention. The compiler does not restrict the type.
 
 ---
 
@@ -1939,6 +2069,64 @@ class ID3D11Device : IUnknown {
         ppTexture: **void) -> int32
 }
 ```
+
+---
+
+## 48.1 Dynamic Library Binding
+
+Prefixing an import path with `dynamic/lib/` signals to the compiler that the
+binding resolves at runtime via `dlopen`/`dlsym` (Linux/macOS) or
+`LoadLibrary`/`GetProcAddress` (Windows) rather than at link time. The class
+declaration syntax is identical to existing native bindings (§48) — the import
+prefix is the only difference.
+
+```vertex
+import "dynamic/lib/cuda"
+
+class Cuda : cuda {
+    func cuInit(flags: int32) -> int32
+    func cuDeviceGet(dev: *int32, ordinal: int32) -> int32
+    func cuMemAlloc(dptr: *CUdevptr, size: int32) -> int32
+    func cuMemFree(dptr: CUdevptr) -> int32
+}
+```
+
+Construction loads the library and resolves all declared symbols eagerly. Use a
+nullable binding to handle absence gracefully:
+
+```vertex
+// traps at runtime if library not found
+var cuda = Cuda()
+
+// nil if library not found or any symbol missing
+var cuda: Cuda? = Cuda()
+if let c = cuda {
+    c.cuInit(0)
+}
+```
+
+Individual functions resolve to `nil` when a symbol is absent from the loaded
+library — useful for version compatibility:
+
+```vertex
+if cuda.cuMemAllocAsync != nil {
+    cuda.cuMemAllocAsync(&ptr, size, stream)
+} else {
+    cuda.cuMemAlloc(&ptr, size)
+}
+```
+
+**Rules:**
+
+* Any import path beginning with `dynamic/lib/` is a dynamic binding — no
+  annotations or new keywords required.
+* All declared functions are resolved eagerly at construction — fail-fast before
+  any call is made.
+* A non-optional binding traps at runtime if the library is not found. Use `T?`
+  to handle absence gracefully.
+* Any declared function whose symbol is absent resolves to `nil`. Calling a `nil`
+  function pointer traps at runtime.
+* No `.delete()` required — dynamic library bindings are not owned heap objects.
 
 ---
 

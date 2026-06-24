@@ -1,4 +1,4 @@
-package literals_test
+package main
 build test
 
 func test_bool_true() test -> Expected(bool, "1") {

@@ -6,20 +6,20 @@ class Counter {
 }
 
 // value receiver — copy, no mutation visible to caller
-func (c: *Counter) getValue() -> int32 {
+func (c: Counter) getValue() -> int32 {
     return c.value
 }
 
 // pointer receivers — mutate caller's binding
-func (c: *Counter) increment() {
+func (c: Counter) increment() {
     c.value += 1
 }
 
-func (c: *Counter) add(n: int32) {
+func (c: Counter) add(n: int32) {
     c.value += n
 }
 
-func (c: *Counter) reset() {
+func (c: Counter) reset() {
     c.value = 0
 }
 

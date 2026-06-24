@@ -6,12 +6,12 @@ class Box {
     ready: bool
 }
 
-func (b: *Box) init(val: int32) {
+func (b: Box) init(val: int32) {
     b.value = val
     b.ready = true
 }
 
-func (b: *Box) deinit() {
+func (b: Box) deinit() {
     b.ready = false
 }
 
