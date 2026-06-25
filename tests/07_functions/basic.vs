@@ -14,7 +14,11 @@ func isPositive(n: int32) -> bool {
 }
 
 func max(a: int32, b: int32) -> int32 {
-    return a > b ? a : b
+    if a > b {
+        return a
+    } else {
+        return b
+    }
 }
 
 func test_add_labeled() test -> Expected(int32, "15") {

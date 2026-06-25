@@ -6,7 +6,11 @@ func divmod(a: int32, b: int32) -> (int32, int32) {
 }
 
 func minMax(a: int32, b: int32) -> (min: int32, max: int32) {
-    return a < b ? (a, b) : (b, a)
+    if a < b {
+        return (a, b)
+    } else {
+        return (b, a)
+    }
 }
 
 func test_tuple_destructure_first() test -> Expected(int32, "3") {
