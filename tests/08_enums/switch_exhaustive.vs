@@ -2,48 +2,48 @@ package enums_test
 build test
 
 enum Fruit {
-    case apple, banana, cherry
+    Apple, Banana, Cherry,
 }
 
 enum Coin {
-    case penny, nickel, dime, quarter
+    Penny, Nickel, Dime, Quarter,
 }
 
 func coinValue(c: Coin) -> int32 {
     switch c {
-    case .penny:   return 1
-    case .nickel:  return 5
-    case .dime:    return 10
-    case .quarter: return 25
+    case .Penny:   return 1
+    case .Nickel:  return 5
+    case .Dime:    return 10
+    case .Quarter: return 25
     }
 }
 
 func test_exhaustive_no_default_needed() test -> Expected(string, "banana") {
-    let f = Fruit.banana
+    let f = Fruit.Banana
     switch f {
-    case .apple:  return "apple"
-    case .banana: return "banana"
-    case .cherry: return "cherry"
+    case .Apple:  return "apple"
+    case .Banana: return "banana"
+    case .Cherry: return "cherry"
     }
 }
 
 func test_exhaustive_context_type() test -> Expected(string, "cherry") {
-    let f: Fruit = .cherry
+    let f: Fruit = .Cherry
     switch f {
-    case .apple:  return "apple"
-    case .banana: return "banana"
-    case .cherry: return "cherry"
+    case .Apple:  return "apple"
+    case .Banana: return "banana"
+    case .Cherry: return "cherry"
     }
 }
 
 func test_coin_penny() test -> Expected(int32, "1") {
-    return coinValue(c: .penny)
+    return coinValue(c: .Penny)
 }
 
 func test_coin_quarter() test -> Expected(int32, "25") {
-    return coinValue(c: .quarter)
+    return coinValue(c: .Quarter)
 }
 
 func test_coin_dime() test -> Expected(int32, "10") {
-    return coinValue(c: .dime)
+    return coinValue(c: .Dime)
 }

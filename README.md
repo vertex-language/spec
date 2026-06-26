@@ -1055,68 +1055,236 @@ rex.rename(newName: "Max")   // rex.name is now "Max"
 
 ## 30. Enums
 
+### 30.1 Unit Variants
+
+No associated data. Variant names are bare identifiers, comma-separated. The `case` keyword is not used in declarations.
+
 ```vertex
 enum Direction {
-    case north
-    case south
-    case east
-    case west
+    North,
+    South,
+    East,
+    West,
 }
 
 enum Permission {
-    case read, write, execute
+    Read,
+    Write,
+    Execute,
 }
 ```
 
-**Raw values — int:**
+Access and switching:
 
 ```vertex
-enum Status: int {
-    case inactive = 0
-    case active   = 1
-    case pending  = 2
+let d = Direction.North
+let d2: Direction = .South
+
+switch d {
+case .North:
+    // ...
+case .South:
+    // ...
+case .East:
+    // ...
+case .West:
+    // ...
 }
-
-let s   = Status.active
-let raw = Status.active.rawValue    // 1
-
-let fromRaw: Status? = Status(rawValue: 1)
 ```
 
-**Raw values — string:**
+---
+
+### 30.2 Tuple Variants (positional associated data)
+
+Variants may carry positional data. Types may be any Vertex scalar, struct, string, or pointer type. Class types are not valid as associated data.
 
 ```vertex
-enum Color: string {
-    case red   = "red"
-    case green = "green"
-    case blue  = "blue"
+enum Shape {
+    Point,
+    Circle(float32),
+    Rectangle(float32, float32),
+    Color(uint8, uint8, uint8),
 }
 
-enum Planet: string {
-    case mercury   // rawValue = "mercury"
-    case venus     // rawValue = "venus"
-    case earth     // rawValue = "earth"
+enum Result {
+    Ok(int32),
+    Err(string),
+}
+
+enum Payload {
+    Integer(int32),
+    Floating(float64),
+    Text(string),
+    Raw(*uint8, int32),
 }
 ```
 
-**Rules:**
+When two or more positional fields share the same type and the distinction matters, carry a named struct as the payload rather than relying on anonymous position:
 
-* Cases are declared with the `case` keyword, one or more per line,
-  comma-separated.
-* Enum values are accessed via dot notation: `EnumType.caseName`.
-* When the type is known from context, the type name may be omitted: `.caseName`.
-* Raw value types must be `int` (or `int32`) or `string`.
-* `int` raw values auto-increment from the previous value if omitted; the first
-  case defaults to `0` if no value is given.
-* `string` raw values default to the case name as a string literal if omitted.
-* `.rawValue` accesses the underlying raw value on a raw-value enum.
-* `EnumType(rawValue:)` constructs from a raw value and returns `EnumType?`.
-* Enums support `==` and `!=`. Raw-value enums also support `<`, `>`, `<=`, `>=`.
-* A `switch` over an enum with all cases covered is exhaustive — `default` is not
-  required.
-* Enums are value types — assignment copies.
-* Enums may not be nested inside structs or classes.
-* Associated values are not supported in 2.1 (deferred).
+```vertex
+struct Size {
+    width:  uint32
+    height: uint32
+}
+
+struct MousePos {
+    x: int32
+    y: int32
+}
+
+enum Event {
+    Quit,
+    KeyPress(uint8),
+    MouseClick(MousePos),
+    Resize(Size),
+}
+```
+
+Construction:
+
+```vertex
+let s = Shape.Circle(1.5)
+let r = Result.Ok(42)
+let p: Payload = .Text("hello")
+let e = Event.Resize(Size{ width: 1920, height: 1080 })
+```
+
+Destructuring in `switch` — bare identifiers, no `let`/`var`:
+
+```vertex
+switch s {
+case .Point:
+    // no data
+case .Circle(r):
+    // r: float32
+case .Rectangle(w, h):
+    // w: float32, h: float32
+case .Color(r, g, b):
+    // r, g, b: uint8
+}
+
+switch e {
+case .Quit:
+    // no data
+case .KeyPress(key):
+    // key: uint8
+case .MouseClick(pos):
+    // pos: MousePos — access via pos.x, pos.y
+case .Resize(size):
+    // size: Size — access via size.width, size.height
+}
+```
+
+Unwanted fields may be ignored with `_`:
+
+```vertex
+switch s {
+case .Rectangle(w, _):
+    // only care about width
+case .Color(r, _, _):
+    // only care about red channel
+default:
+    // ...
+}
+```
+
+---
+
+### 30.3 Mixed Variants
+
+Unit and tuple shapes may be freely combined in one enum:
+
+```vertex
+enum Message {
+    Quit,
+    Move(int32, int32),
+    Write(string),
+    ChangeColor(uint8, uint8, uint8),
+}
+
+enum NetworkEvent {
+    Connected,
+    Disconnected,
+    Data(*uint8, int32),
+    Error(string),
+}
+```
+
+---
+
+### 30.4 Explicit Discriminants
+
+Raw integer values may be assigned to unit variants with `= constantExpr`. The backing type is declared after the enum name with `: intType`. Auto-increment applies to unspecified variants.
+
+Explicit discriminants are only valid on enums where **all** variants are unit — mixing tuple variants with a backing type is a compile error.
+
+```vertex
+enum Status : int32 {
+    Inactive = 0,
+    Active   = 1,
+    Pending  = 2,
+}
+
+enum HttpMethod : uint8 {
+    Get    = 0,
+    Post,       // 1
+    Put,        // 2
+    Delete,     // 3
+}
+
+enum ErrorCode : uint16 {
+    None    = 0,
+    Timeout = 408,
+    Denied  = 403,
+    Missing = 404,
+    Crash,      // 405
+}
+```
+
+Cast to the backing type with `as`:
+
+```vertex
+let s   = Status.Active
+let raw = s as int32                    // 1
+
+let code = ErrorCode.Missing as uint16  // 404
+```
+
+Integer-to-enum conversion is an explicit `switch` returning `EnumType?` — honest about the fact that not every integer maps to a valid variant:
+
+```vertex
+func statusFromInt(n: int32) -> Status? {
+    switch n {
+    case 0: return .Inactive
+    case 1: return .Active
+    case 2: return .Pending
+    default: return nil
+    }
+}
+```
+
+---
+
+### Rules
+
+- The `case` keyword is removed from enum declarations. It is retained only inside `switch` statements.
+- Variants are bare identifiers separated by commas, one or more per line.
+- The two variant shapes are unit (`Name`) and tuple (`Name(T, ...)`). Both may be freely combined in one enum.
+- Variant names may use any casing — no convention is enforced by the compiler.
+- Tuple variant types follow the same rules as function parameters — any scalar, string, struct, or pointer type is valid. Class types are not valid as associated data.
+- When two or more positional fields of the same type need labels, carry a named struct as the tuple payload.
+- Switch destructuring binds bare identifiers — no `let` or `var` in patterns.
+- Tuple variants destructure positionally: `case .Circle(r):` — `r` is scoped to that case body only.
+- Unwanted fields in a tuple destructure may be discarded with `_`.
+- When a tuple payload is a struct, the bound identifier gives access to its fields via dot notation.
+- Enums do not support `==`, `!=`, or any comparison operator. Equality must be expressed via `switch`.
+- Explicit discriminants require a backing type declared as `enum Name : intType`. Valid backing types are `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`.
+- Explicit discriminants are only valid on all-unit enums. Mixing tuple variants with `: intType` is a compile error.
+- Auto-increment applies to unspecified discriminants — the first defaults to `0`; each subsequent is one higher than the previous.
+- Typed enums may be cast to their backing type with `as`. There is no built-in integer-to-enum conversion.
+- `switch` over an enum with all variants covered is exhaustive — `default` is not required.
+- Enums are value types — assignment copies.
+- Enums may not be nested inside structs or classes.
 
 ---
 

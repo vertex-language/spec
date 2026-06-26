@@ -4,3 +4,4 @@ dumps/
 *.dump
 
 *.bin
+.DS_Store

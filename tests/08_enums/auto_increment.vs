@@ -1,32 +1,32 @@
 package enums_test
 build test
 
-// No explicit values — should auto-increment from 0
-enum Level: int {
-    case low
-    case mid
-    case high
+// No explicit values — auto-increments from 0
+enum Level : int32 {
+    Low,
+    Mid,
+    High,
 }
 
-// Partial explicit — first anchored, rest continue from there
-enum Priority: int {
-    case none   = 0
-    case normal = 5
-    case urgent
+// Partial explicit — anchored at 0 and 5, Urgent continues to 6
+enum Priority : int32 {
+    None   = 0,
+    Normal = 5,
+    Urgent,
 }
 
 func test_auto_increment_first() test -> Expected(int32, "0") {
-    return Level.low.rawValue
+    return Level.Low as int32
 }
 
 func test_auto_increment_second() test -> Expected(int32, "1") {
-    return Level.mid.rawValue
+    return Level.Mid as int32
 }
 
 func test_auto_increment_third() test -> Expected(int32, "2") {
-    return Level.high.rawValue
+    return Level.High as int32
 }
 
 func test_auto_increment_after_explicit() test -> Expected(int32, "6") {
-    return Priority.urgent.rawValue
+    return Priority.Urgent as int32
 }
