@@ -24,227 +24,225 @@
 
 ---
 
-## Import Path Conventions
+## Core Concept — Everything is a Normal Object
 
-The import path prefix is the sole signal for how a binding is lowered.
-No annotations or new keywords are needed.
-
-| Import path | What it means | Lowering |
-|---|---|---|
-| `darwin/framework/X` | ObjC framework (AppKit, UIKit, WebKit, etc.) | ObjC runtime — `objc_msgSend`, selectors, alloc/init |
-| `darwin/lib/X` | Plain C library on Darwin (CoreGraphics, libc, etc.) | Direct C extern calls, same as Linux |
-| `linux/lib/X` | Plain C library on Linux | Direct C extern calls |
-
-The `darwin/lib/` pattern already works and is stable — for example:
+Darwin-bound classes in Vertex behave like any other class. No `self` parameter
+in binding declarations, no class-method vs instance-method distinction exposed
+to the user. You construct an object, you call methods on it.
 
 ```vertex
-import "darwin/lib/c"    // libc on Darwin — direct C calls, no ObjC involvement
-import "linux/lib/c"     // libc on Linux  — identical lowering
+import "darwin/framework/Foundation"
+
+class NSURL : Foundation {
+    func URLWithString(string: *const char) -> NSURL?
+    func absoluteString() -> *const char
+    func path() -> *const char
+}
+
+// No special init — compiler emits alloc+init automatically
+var url = NSURL()
+let result = url.URLWithString(string: "https://example.com")
+let p      = url.path()
 ```
 
-Apple calls many C-based libraries "frameworks" (CoreGraphics, CoreFoundation,
-Accelerate), but in Vertex those are imported via `darwin/lib/` not
-`darwin/framework/`. The `darwin/framework/` prefix specifically means
-ObjC runtime binding — that is the complete and correct distinction.
+The compiler always emits `alloc+init` for `Type()` construction of a
+darwin-bound class. The binding declarations carry no `self` parameter —
+the receiver is implicit, exactly like any other Vertex class method.
 
 ---
 
-## The Full Pipeline
+## Custom Init Selectors
 
-```
-Vertex source
-    → Vertex IR (VIR)
-        → Machine IR
-            → Machine Code / ASM
-                → .o
-                    → Mach-O binary (macho linker)
-                        → signed binary (macho/codesign)
-```
-
----
-
-## How It Fits in the vir Package
-
-The vir package lowers one `ast.Package` into a single `vertex.Module`
-via `NewLower`. ObjC support adds no new passes — it hooks into the
-four existing phases that `NewLower` already runs in order:
-
-```
-NewLower
-    declareTypes()      ← detects darwin-bound class decls (externCls map)
-    declareExterns()    ← registers ObjC binding methods via resolveImportLib
-    declareRuntime()    ← injects objc_getClass / objc_msgSend / sel_registerName
-    declareFuncs()      ← normal Vertex functions, unchanged
-    declareGlobals()    ← normal globals, unchanged
-    lowerBodies()
-        frame.methodCall()   ← darwin dispatch path (new branch)
-        frame.call()         ← constructor alloc+init injection
-```
-
-No new passes. No new IR instructions. Two files added to the package:
-
-```
-vir/
-    runtime_objc.go     ← declareObjcRuntime(), selector string interning
-    lower_objc.go       ← emitObjcCall(), emitObjcAlloc(), block lowering
-```
-
-Everything else (types.go, decl.go, expr.go, stmt.go) grows small
-targeted branches.
-
----
-
-## Stage 1 — Vertex Source
-
-The import prefix `darwin/framework/` is the only signal needed.
-No new keywords, no annotations.
+When construction requires arguments (e.g. `initWithFrame:configuration:`),
+declare a `func (receiver: T) init()` body. Its presence tells the compiler
+which `init`-prefixed binding method to match against the call args.
 
 ```vertex
 import "darwin/framework/WebKit"
 
 class WKWebView : WebKit {
-    func initWithFrame(self: WKWebView, frame: CGRect, configuration: WKWebViewConfiguration) -> WKWebView
-    func loadHTMLString(self: WKWebView, string: *const char, baseURL: NSURL?)
-    func goBack(self: WKWebView)
+    func initWithFrame(frame: CGRect, configuration: WKWebViewConfiguration) -> WKWebView
+    func loadHTMLString(string: *const char, baseURL: NSURL?)
+    func goBack()
 }
 
-var w = WKWebView()
-w.initWithFrame(frame: myRect, configuration: config)
+func (wk: WKWebView) init() {}   // signals: alloc + resolve init selector from call args
+
+// Compiler sees WKWebView() → alloc + init
+// Compiler sees WKWebView(initWithFrame: r, configuration: c) → alloc + initWithFrame:configuration:
+var w  = WKWebView()
+var w2 = WKWebView(initWithFrame: myRect, configuration: cfg)
+w2.loadHTMLString(string: html, baseURL: nil)
+w2.goBack()
+```
+
+Without the `func (wk: WKWebView) init() {}` body, `WKWebView()` is a compile
+error — the compiler has no init selector to emit. The body itself is empty
+and generates no code; its presence is the signal only.
+
+---
+
+## Init Selector Resolution
+
+When a `func (r: T) init()` body is present, the compiler resolves the init
+selector from the call-site arguments by matching labels against binding
+declarations prefixed with `init`:
+
+| Call site | Emitted ObjC selector |
+|---|---|
+| `WKWebView()` | `alloc` + `init` |
+| `WKWebView(initWithFrame: r, configuration: c)` | `alloc` + `initWithFrame:configuration:` |
+| `WKWebView(initWithCoder: c)` | `alloc` + `initWithCoder:` |
+
+Selector generation: method name + each param label + `:` per label present.
+
+```
+func initWithFrame(frame, configuration)  →  "initWithFrame:configuration:"
+func initWithCoder(coder)                 →  "initWithCoder:"
+```
+
+---
+
+## Binding Declarations — No `self`, No Class/Instance Split
+
+Binding methods inside a darwin-bound class are always instance methods from
+Vertex's perspective. The compiler emits `objc_msgSend` with the object as
+receiver for every method call. There is no annotation needed to distinguish
+class methods — if the underlying ObjC method is a class method (like
+`URLWithString` on NSURL), you simply call it on the allocated instance and
+the ObjC runtime handles it correctly via the class's method table.
+
+```vertex
+// Binding declaration — clean, no self, no noise
+class NSURL : Foundation {
+    func URLWithString(string: *const char) -> NSURL?
+    func URLWithString(string: *const char, relativeToURL: NSURL?) -> NSURL?
+    func absoluteString() -> *const char
+    func path() -> *const char
+    func host() -> *const char
+}
+
+var url  = NSURL()
+var full = url.URLWithString(string: "https://example.com")
+var rel  = url.URLWithString(string: "/api", relativeToURL: full)
+```
+
+---
+
+## Selector Generation — Deterministic from Declaration
+
+```
+method name + each param label + ":" per label
+
+func URLWithString(string)                       →  "URLWithString:"
+func URLWithString(string, relativeToURL)        →  "URLWithString:relativeToURL:"
+func initWithFrame(frame, configuration)         →  "initWithFrame:configuration:"
+func loadHTMLString(string, baseURL)             →  "loadHTMLString:baseURL:"
+func goBack()                                    →  "goBack"
+```
+
+Computed in `runtime_objc.go` by `selectorForMethod()` and interned as a
+passive data segment via `internSelectorLit`.
+
+---
+
+## Import Path Conventions
+
+| Import path | What it means | Lowering |
+|---|---|---|
+| `darwin/framework/X` | ObjC framework (AppKit, UIKit, WebKit, etc.) | ObjC runtime — `objc_msgSend`, selectors, alloc+init |
+| `darwin/lib/X` | Plain C library on Darwin (CoreGraphics, libc, etc.) | Direct C extern calls |
+| `linux/lib/X` | Plain C library on Linux | Direct C extern calls |
+
+`darwin/framework/` is the sole signal for ObjC runtime lowering. Everything
+else is a direct C call.
+
+---
+
+## How It Fits in the vir Package
+
+No new passes. Hooks into the four existing phases `NewLower` already runs:
+
+```
+NewLower
+    declareTypes()      ← detects darwin-bound class decls, populates isDarwinCls
+    declareExterns()    ← registers binding methods via resolveImportLib
+    declareRuntime()    ← injects objc_getClass / objc_msgSend / sel_registerName
+    declareFuncs()      ← detects func (r: T) init() bodies, records initCls map
+    declareGlobals()    ← unchanged
+    lowerBodies()
+        frame.call()         ← WKWebView(...) → emitObjcAlloc
+        frame.methodCall()   ← w.goBack()     → emitObjcCall
+```
+
+Two files added:
+
+```
+vir/
+    runtime_objc.go     ← declareObjcRuntime(), internSelectorLit(), selectorForMethod()
+    lower_objc.go       ← emitObjcCall(), emitObjcAlloc()
+```
+
+---
+
+## Stage 1 — Vertex Source Examples
+
+### NSURL — no custom init needed
+```vertex
+import "darwin/framework/Foundation"
+
+class NSURL : Foundation {
+    func URLWithString(string: *const char) -> NSURL?
+    func absoluteString() -> *const char
+    func path() -> *const char
+}
+
+var url     = NSURL()
+var result  = url.URLWithString(string: "https://example.com")
+let p       = result.path()
+```
+
+### WKWebView — custom init selector
+```vertex
+import "darwin/framework/WebKit"
+
+class WKWebView : WebKit {
+    func initWithFrame(frame: CGRect, configuration: WKWebViewConfiguration) -> WKWebView
+    func loadHTMLString(string: *const char, baseURL: NSURL?)
+    func goBack()
+    func goForward()
+}
+
+func (wk: WKWebView) init() {}
+
+var w = WKWebView(initWithFrame: myRect, configuration: cfg)
 w.loadHTMLString(string: html, baseURL: nil)
 w.goBack()
 ```
 
----
-
-### Selector Generation — deterministic from the declaration
-
-```
-func name + each non-self param label + ":"
-
-func initWithFrame(self, frame, configuration)  →  "initWithFrame:configuration:"
-func loadHTMLString(self, string, baseURL)       →  "loadHTMLString:baseURL:"
-func goBack(self)                               →  "goBack"
-```
-
-This is computed in `runtime_objc.go` by `selectorForMethod(m *ast.MethodSig) string`
-and the result is interned as a passive data segment via `internSelectorLit`.
-
----
-
-### Dispatch Rule — `self` presence
-
-The `self` parameter drives dispatch. No new keywords.
-
-| `self` in params | Dispatch |
-|---|---|
-| present | instance — `objc_msgSend` on the variable |
-| absent  | class — `objc_msgSend` on `objc_getClass` |
-
-In `expr.go`, `frame.methodCall` already checks `f.l.externCls[recvVT.name]`
-and takes a no-receiver path. The darwin path extends that branch:
-
-```go
-// expr.go — methodCall (existing extern-class branch, extended)
-if f.l.externCls[recvVT.name] {
-    if f.l.isDarwinCls[recvVT.name] {
-        return f.emitObjcCall(recvVT, sel.Sel, x)   // new
-    }
-    // existing C extern path
-    if fi, ok := f.l.methodIdx[key]; ok { ... }
-}
-```
-
-`isDarwinCls` is a `map[string]bool` populated in `declareTypes` alongside
-the existing `externCls` map when the parent resolves to a `darwin:` lib.
-
----
-
-### Alloc Injection Rule — constructor form only
-
-Handled in `frame.call` in `expr.go`, which already routes `Type()` through
-`constructClass`. A darwin check there redirects to `emitObjcAlloc`:
-
-```go
-// expr.go — call (existing constructClass branch, extended)
-if _, isClass := f.l.classDecls[fn.Name]; isClass {
-    if f.l.isDarwinCls[fn.Name] {
-        return f.emitObjcAlloc(fn.Name, x)   // new
-    }
-    return f.constructClass(fn.Name, x)
-}
-```
-
-| Call site | Compiler action |
-|---|---|
-| `WKWebView()` | alloc + init |
-| `WKWebView(initWithFrame: ...)` | alloc + named init selector |
-| `a.URLWithString(...)` | no alloc — dot form, class dispatch only |
-
----
-
-### Nullable — `?` suffix (§27)
-
-`NSURL?` is already a valid Vertex nullable (§27). No new grammar.
-At the VIR level it is `ptr?` — the compiler accepts `nil` / `ptr.null`
-at the call site. No ObjC-specific handling needed.
-
----
-
-### Memory — `auto` and `weak let` (§31.1, §32.1)
-
-`auto` on a darwin-bound class lowers to `objc_msgSend(obj, sel_release)`
-rather than `RcRelease`. `weak let` lowers to `objc_storeWeak` /
-`objc_loadWeak`. Both are handled in `emitAutoDelete` in `stmt.go`:
-
-```go
-// stmt.go — emitAutoDelete (darwin extension)
-if f.l.isDarwinCls[vt.name] {
-    // emit: objc_msgSend(obj, sel_release)
-    f.b.LocalGet(loc)
-    f.emitSelCall("release", loc, vt, nil)
-    return
-}
-```
-
----
-
-### Blocks — anonymous functions (§36)
-
-When a darwin-bound method declares a parameter of function type (§35),
-`emitObjcCall` in `lower_objc.go` detects it via the param's `vtype.isRef`
-and func type index, then emits a block struct (isa + invoke + descriptor +
-captured env) rather than a raw funcref. The anonymous function literal
-(§36) is the signal — no new syntax.
-
----
-
-### Delegates / Protocols — Vertex class as ObjC protocol impl
-
-A Vertex class declared with a darwin protocol parent becomes an ObjC
-protocol implementation. `declareTypes` in `types.go` detects this and
-records it in a `protocolImpls` map. A new startup function
-(`emitObjcStartup` in `lower_objc.go`) is injected before `main` and
-calls `objc_allocateClassPair` / `class_addMethod` / `objc_registerClassPair`
-for each registered protocol impl.
-
+### NSString — multiple init selectors
 ```vertex
-import "darwin/framework/WebKit"
+import "darwin/framework/Foundation"
 
-class MyNavDelegate : WebKit.WKNavigationDelegate {
-    func webView(self: MyNavDelegate, didFinishNavigation: WKNavigation?)
+class NSString : Foundation {
+    func initWithUTF8String(nullTerminatedCString: *const char) -> NSString
+    func initWithFormat(format: *const char) -> NSString
+    func UTF8String() -> *const char
+    func length() -> int32
 }
 
-func (d: MyNavDelegate) webView(didFinishNavigation nav: WKNavigation?) {
-    io.printf("done\n")
-}
+func (s: NSString) init() {}
+
+var s1 = NSString(initWithUTF8String: "hello")
+var s2 = NSString(initWithFormat: "%d items")
+let cs = s1.UTF8String()
 ```
 
 ---
 
 ## Stage 2 — What declareObjcRuntime() Injects
 
-`runtime_objc.go` mirrors `runtime_arrays.go` exactly but is even thinner —
-no emit logic, pure declarations:
+`runtime_objc.go` mirrors `runtime_arrays.go` — pure declarations, no emit logic:
 
 ```go
 func (l *Lower) declareObjcRuntime() {
@@ -271,8 +269,6 @@ func (l *Lower) declareObjcRuntime() {
             Params:  []vertex.Param{{Type: ptr}},
             Results: []vertex.ValType{ptr},
         })
-
-    // Weak ref support — only imported when weak let appears on a darwin class.
     reg("objc_storeWeak",
         vertex.FuncType{
             Params: []vertex.Param{{Type: ptr}, {Type: ptr}},
@@ -283,14 +279,13 @@ func (l *Lower) declareObjcRuntime() {
             Results: []vertex.ValType{ptr},
         })
 
-    // Block descriptor global — only imported when block params appear.
     l.mod.Imports.ImportGlobal(
         "darwin:libSystem.dylib", "_NSConcreteStackBlock",
         vertex.GlobalType{Mut: false, Type: ptr})
 }
 ```
 
-`declareRuntime` in `decl.go` calls this under a target check:
+`declareRuntime` in `decl.go` calls this under a target guard:
 
 ```go
 func (l *Lower) declareRuntime() {
@@ -306,73 +301,48 @@ func (l *Lower) declareRuntime() {
 
 ---
 
-## Stage 3 — emitObjcCall (lower_objc.go)
+## Stage 3 — Init Body Detection
 
-This is where the actual VIR emit sequence lives. It is called from
-`methodCall` in `expr.go` whenever `isDarwinCls` is true.
+`declareFuncs()` in `decl.go` already walks all `FuncDecl` nodes. When a
+receiver function named `init` is found on a darwin-bound class, it is
+recorded in `l.initCls`:
 
 ```go
-// lower_objc.go
-func (f *frame) emitObjcCall(recvVT vtype, methodName string, x *ast.CallExpr) vtype {
-    cd := f.l.classDecls[recvVT.name]
-    m  := f.l.findMethod(cd, methodName)
-
-    sel    := selectorForMethod(m)                      // "loadHTMLString:baseURL:"
-    selDat := f.l.internSelectorLit(sel)               // passive data segment
-
-    msgSend := f.l.funcIdx["objc_.objc_msgSend"]
-    selReg  := f.l.funcIdx["objc_.sel_registerName"]
-
-    // 1. Register selector — sel_registerName(&"loadHTMLString:baseURL:\0")
-    selLoc := f.newLocal(ptrVT)
-    f.b.DataAddr(selDat)
-    f.b.Call(selReg)
-    f.b.LocalSet(selLoc)
-
-    // 2. Receiver
-    hasSelf := methodHasSelf(m)
-    if hasSelf {
-        f.expr(x.Fun.(*ast.SelectorExpr).X, &recvVT)   // push object
-    } else {
-        // Class dispatch: objc_getClass(&"WKWebView\0")
-        clsDat := f.l.internSelectorLit(recvVT.name)
-        getClass := f.l.funcIdx["objc_.objc_getClass"]
-        f.b.DataAddr(clsDat)
-        f.b.Call(getClass)
+// decl.go — inside declareFuncs(), existing receiver func loop
+if fd.Receiver != nil && fd.Name == "init" {
+    typeName := recvTypeName(fd.Receiver.Type)
+    if l.isDarwinCls[typeName] {
+        l.initCls[typeName] = true   // alloc+init injection is valid
+        // no VIR function body emitted — signal only
+        continue
     }
-
-    // 3. SEL
-    f.b.LocalGet(selLoc)
-
-    // 4. Arguments — block params get wrapped; plain params pass through
-    sig := f.l.methodSig[recvVT.name+"."+methodName]
-    f.pushObjcArgs(x.Args, sig, m)
-
-    // 5. Call
-    f.b.Call(msgSend)
-
-    return f.l.objcReturnVType(m)
 }
 ```
 
-Selector strings are interned the same way as string literals — via
-`internSelectorLit` in `runtime_objc.go`, which calls `mod.Data.AddPassive`
-and deduplicates through a `selectorLits map[string]vertex.DataIdx` on the
-`Lower` struct.
+`initCls map[string]bool` lives on `Lower` alongside `isDarwinCls`.
 
 ---
 
 ## Stage 4 — emitObjcAlloc (lower_objc.go)
 
+Called from `frame.constructClass` in `expr.go` when `isDarwinCls` is true.
+
 ```go
 func (f *frame) emitObjcAlloc(className string, x *ast.CallExpr) vtype {
-    clsDat  := f.l.internSelectorLit(className)
-    selAlloc := f.l.internSelectorLit("alloc")
+    if !f.l.initCls[className] {
+        f.errorf(x.Pos(), "cannot construct %q: no init body declared", className)
+        f.b.PtrNull()
+        return ptrVT
+    }
+
     getClass := f.l.funcIdx["objc_.objc_getClass"]
     msgSend  := f.l.funcIdx["objc_.objc_msgSend"]
     selReg   := f.l.funcIdx["objc_.sel_registerName"]
 
-    // objc_getClass("WKWebView")
+    clsDat   := f.l.internSelectorLit(className)
+    allocDat := f.l.internSelectorLit("alloc")
+
+    // objc_getClass("ClassName")
     f.b.DataAddr(clsDat)
     f.b.Call(getClass)
     clsLoc := f.newLocal(ptrVT)
@@ -380,31 +350,88 @@ func (f *frame) emitObjcAlloc(className string, x *ast.CallExpr) vtype {
 
     // alloc
     f.b.LocalGet(clsLoc)
-    f.b.DataAddr(selAlloc)
+    f.b.DataAddr(allocDat)
     f.b.Call(selReg)
+    allocSelLoc := f.newLocal(ptrVT)
+    f.b.LocalSet(allocSelLoc)
+    f.b.LocalGet(clsLoc)
+    f.b.LocalGet(allocSelLoc)
     f.b.Call(msgSend)
     objLoc := f.newLocal(ptrVT)
     f.b.LocalSet(objLoc)
 
-    // init selector — "init" or "initWithFrame:configuration:" etc.
+    // resolve init selector from call args
     initSel, initMethod := f.l.resolveInitSelector(className, x)
-    selDat := f.l.internSelectorLit(initSel)
+    initDat := f.l.internSelectorLit(initSel)
+
     f.b.LocalGet(objLoc)
-    f.b.DataAddr(selDat)
+    f.b.DataAddr(initDat)
     f.b.Call(selReg)
+    initSelLoc := f.newLocal(ptrVT)
+    f.b.LocalSet(initSelLoc)
+    f.b.LocalGet(objLoc)
+    f.b.LocalGet(initSelLoc)
     if initMethod != nil {
         sig := f.l.methodSig[className+"."+initMethod.Name]
-        f.pushObjcArgs(x.Args, sig, initMethod)
+        f.pushArgs(x.Args, sig, 0)
     }
     f.b.Call(msgSend)
 
-    return ptrVT   // darwin objects are raw ptr
+    return ptrVT
+}
+```
+
+`resolveInitSelector` in `runtime_objc.go` scans the class's binding methods
+for one prefixed with `init` whose param labels match the call args, falling
+back to `"init"` for zero-arg construction.
+
+---
+
+## Stage 5 — emitObjcCall (lower_objc.go)
+
+Called from `frame.methodCall` in `expr.go` when `isDarwinCls` is true.
+
+```go
+func (f *frame) emitObjcCall(recvVT vtype, methodName string, x *ast.CallExpr) vtype {
+    msgSend := f.l.funcIdx["objc_.objc_msgSend"]
+    selReg  := f.l.funcIdx["objc_.sel_registerName"]
+
+    cd := f.l.classDecls[recvVT.name]
+    m  := f.l.findMethod(cd, methodName)
+    if m == nil {
+        f.errorf(x.Pos(), "no binding method %q on darwin class %s", methodName, recvVT.name)
+        f.b.I32Const(0)
+        return i32T
+    }
+
+    sel    := selectorForMethod(m)
+    selDat := f.l.internSelectorLit(sel)
+
+    // Register selector
+    f.b.DataAddr(selDat)
+    f.b.Call(selReg)
+    selLoc := f.newLocal(ptrVT)
+    f.b.LocalSet(selLoc)
+
+    // Push receiver (always an instance — the allocated object)
+    f.expr(x.Fun.(*ast.SelectorExpr).X, &recvVT)
+
+    // Push SEL
+    f.b.LocalGet(selLoc)
+
+    // Push args
+    sig := f.l.methodSig[recvVT.name+"."+methodName]
+    f.pushArgs(x.Args, sig, 0)
+
+    f.b.Call(msgSend)
+
+    return f.l.objcReturnVType(m)
 }
 ```
 
 ---
 
-## Stage 5 — VIR Output
+## Stage 6 — VIR Output
 
 The compiled module contains only three undefined symbols:
 
@@ -423,26 +450,22 @@ LC_LOAD_DYLIB  /System/Library/Frameworks/WebKit.framework/WebKit
 
 ---
 
-## Stage 6 — Runtime Boot Sequence
+## Stage 7 — Runtime Boot Sequence
 
 ```
 kernel maps Mach-O into memory
     → dyld reads LC_LOAD_DYLIB entries
     → maps libobjc into process
-    → maps WebKit into process
+    → maps framework into process
     → ObjC runtime initializers fire
-    → Vertex startup fn runs (emitObjcStartup)
-        → objc_allocateClassPair / class_addMethod / objc_registerClassPair
-          for each protocol impl class
-    → WKWebView and all framework classes registered into global class table
     → main() runs
-    → objc_getClass("WKWebView") finds it
-    → objc_msgSend dispatches through it
+    → WKWebView() → objc_getClass → alloc → initWithFrame:configuration:
+    → w.goBack()  → objc_msgSend(w, "goBack")
 ```
 
 ---
 
-## Stage 7 — Code Signing
+## Stage 8 — Code Signing
 
 ```go
 exe, err    := l.Link()
@@ -450,8 +473,75 @@ signed, err := codesign.SignImage(exe, codesign.Options{Identifier: "myapp"})
 os.WriteFile("myapp", signed, 0755)
 ```
 
-Apple Silicon requires a valid signature — the kernel rejects
-unsigned binaries before `main` is reached.
+Apple Silicon requires a valid signature — the kernel rejects unsigned
+binaries before `main` is reached.
+
+---
+
+## Memory — `auto` and `weak let`
+
+`auto` on a darwin-bound class lowers to `objc_msgSend(obj, sel_release)`
+rather than `RcRelease`. `weak let` lowers to `objc_storeWeak` /
+`objc_loadWeak`. Both are handled in `emitAutoDelete` in `stmt.go`:
+
+```go
+if f.l.isDarwinCls[vt.name] {
+    f.b.LocalGet(loc)
+    f.emitSelCall("release", loc, vt, nil)
+    return
+}
+```
+
+---
+
+## Blocks — Anonymous Functions
+
+When a binding method declares a parameter of function type, `emitObjcCall`
+detects it via the param's `vtype.isRef` and func type index, then emits a
+block struct (isa + invoke + descriptor + captured env) rather than a raw
+funcref. The anonymous function literal is the signal — no new syntax.
+
+---
+
+## Delegates / Protocols
+
+A Vertex class declared with a darwin protocol parent becomes an ObjC
+protocol implementation. `declareTypes` records it in `protocolImpls`. A
+startup function (`emitObjcStartup` in `lower_objc.go`) is injected before
+`main` and calls `objc_allocateClassPair` / `class_addMethod` /
+`objc_registerClassPair` for each registered protocol impl.
+
+```vertex
+import "darwin/framework/WebKit"
+
+class MyNavDelegate : WebKit.WKNavigationDelegate {
+    func webView(didFinishNavigation: WKNavigation?)
+}
+
+func (d: MyNavDelegate) webView(didFinishNavigation nav: WKNavigation?) {
+    io.printf("done\n")
+}
+```
+
+---
+
+## Grammar Signal Summary
+
+Every ObjC concept expressed through existing Vertex grammar. No new keywords.
+
+| ObjC concept | Vertex grammar signal |
+|---|---|
+| Framework binding | `import "darwin/framework/X"` |
+| Instance method | binding method with no `self` param |
+| Construction + alloc | `func (r: T) init() {}` body present |
+| Default init | `Type()` — `alloc` + `init` |
+| Named init selector | `Type(initWithX: ...)` — labels matched to binding |
+| Nil argument | `nil` to any `T?` param |
+| ARC-style release | `auto var` binding |
+| Weak reference | `weak let` binding |
+| Block parameter | `func(...) -> T` param type on binding method |
+| Protocol impl | `class MyClass : Framework.ProtocolName` |
+| `dealloc` | `deinit` on darwin-bound class |
 
 ---
 
@@ -459,31 +549,9 @@ unsigned binaries before `main` is reached.
 
 | File | What changes |
 |---|---|
-| `runtime_objc.go` | `declareObjcRuntime()`, `internSelectorLit()`, `selectorForMethod()` |
+| `runtime_objc.go` | `declareObjcRuntime()`, `internSelectorLit()`, `selectorForMethod()`, `resolveInitSelector()` |
 | `lower_objc.go` | `emitObjcCall()`, `emitObjcAlloc()`, `emitObjcStartup()`, block struct emit |
-| `types.go` | `declareTypes()` populates `isDarwinCls`, `protocolImpls` alongside existing `externCls` |
-| `decl.go` | `declareRuntime()` calls `declareObjcRuntime()` under darwin target guard |
-| `expr.go` | `methodCall()` branches to `emitObjcCall()`; `call()` branches to `emitObjcAlloc()` |
+| `types.go` | `declareTypes()` populates `isDarwinCls`, `protocolImpls` |
+| `decl.go` | `declareRuntime()` calls `declareObjcRuntime()`; `declareFuncs()` detects init bodies into `initCls` |
+| `expr.go` | `methodCall()` branches to `emitObjcCall()`; `constructClass()` branches to `emitObjcAlloc()` |
 | `stmt.go` | `emitAutoDelete()` branches to `objc_msgSend(sel_release)` for darwin classes |
-
----
-
-## Grammar Signal Summary
-
-Every ObjC concept is expressed entirely through existing Vertex grammar.
-No new keywords.
-
-| ObjC concept | Vertex grammar signal | § |
-|---|---|---|
-| Framework binding | `import "darwin/framework/X"` | §34 |
-| Instance method | `self` as first param in binding | §48 |
-| Class method / factory | no `self` in binding | §48 |
-| Constructor + alloc | `Type()` or `Type(initWith...)` paren form | §31 |
-| Nil argument | `nil` to any `T?` param | §27 |
-| Nullable return | `-> T?` on binding declaration | §27 |
-| ARC-style release | `auto var` binding | §32.1 |
-| Weak reference | `weak let` binding | §31.1 |
-| Block parameter | `func(...) -> T` param type on darwin-bound method | §35–36 |
-| Protocol impl | `class MyClass : Framework.ProtocolName` | §31, §48 |
-| Protocol method | associated func (§29) matching selector on protocol class | §29 |
-| `dealloc` | `deinit` on darwin-bound class | §31 |
