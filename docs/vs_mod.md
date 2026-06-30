@@ -43,7 +43,7 @@ semantics to repeated single lines and is not load-bearing syntax.)
 
 ```
 pkg sqlite3 (
-    linux   apt    libsqlite3-dev 3.45.0-1
+    linux   apt    libsqlite3-dev 3.45.0-1  link=sqlite3
     darwin  brew   sqlite3        3.45.0
     windows vcpkg  sqlite3        3.45.0
 )
@@ -58,51 +58,54 @@ import sqlite3 "pkg/lib/sqlite3"
 The logical name (`sqlite3`) in the `pkg` block header must match the final
 path segment of the `pkg/lib/<name>` import. The compiler resolves the
 import by finding the matching `pkg` block, picking the row whose `os`
-matches the build target, and fetching/vendoring that provider's artifact
-into a common local folder for linking.
+matches the build target, fetching/vendoring that provider's artifact into
+a common local folder, and linking it using the row's `link` name(s).
 
 ### 2.1 Row grammar
 
 Each line inside a `pkg` block is one **provider entry**, in one of two
-forms:
+positional forms, plus an optional trailing named field:
 
-**Short form** (3 fields) — uses the OS's default package manager:
-
-```
-<os> <name> <version>
-```
-
-**Long form** (4 fields) — explicit manager, required when more than one
-provider exists for the same OS, or when the default manager isn't wanted:
+**Short form** (3 positional fields) — uses the OS's default package
+manager:
 
 ```
-<os> <manager> <name> <version>
+<os> <name> <version> [link=<libname>[,<libname>...]]
 ```
 
-The parser disambiguates by field count alone — no keyword needed. Three
-space-separated tokens after the OS column means short form; four means
-long form.
+**Long form** (4 positional fields) — explicit manager, required when more
+than one provider exists for the same OS, or when the default manager
+isn't wanted:
+
+```
+<os> <manager> <name> <version> [link=<libname>[,<libname>...]]
+```
+
+The parser disambiguates short vs. long form by **positional** field count
+alone (3 vs. 4) — `link=...` is a named field, not positional, and does not
+affect that count. It may appear at the end of either form.
 
 ```
 pkg sqlite3 (
-    linux   libsqlite3-dev 3.45.0-1     # short form: linux default = apt
-    darwin  sqlite3        3.45.0       # short form: darwin default = brew
+    linux   libsqlite3-dev 3.45.0-1  link=sqlite3   # short form
+    darwin  sqlite3        3.45.0                    # short form, link defaults to "sqlite3"
 )
 
 pkg openssl (
-    linux apt    libssl-dev 3.0.2-0ubuntu1   # long form: two linux providers,
-    linux vcpkg  openssl    3.2.0             #   so manager must be explicit
+    linux apt    libssl-dev 3.0.2-0ubuntu1  link=ssl,crypto   # long form
+    linux vcpkg  openssl    3.2.0           link=ssl,crypto   # long form
 )
 ```
 
-### 2.2 Columns
+### 2.2 Columns / fields
 
-| Column | Required | Values | Notes |
-|---|---|---|---|
-| `os` | yes | `linux`, `darwin`, `windows`, `any` | `any` is checked last, after all OS-specific rows fail to resolve |
-| `manager` | only in long form | `apt`, `dnf`, `pacman`, `brew`, `vcpkg`, ... | omitted in short form — the OS's default manager is used |
-| `name` | yes | string, no spaces | the package name *as that specific manager* names it |
-| `version` | optional | string, no spaces | omitted = "whatever the manager currently has"; present = hard pin |
+| Field | Form | Required | Values | Notes |
+|---|---|---|---|---|
+| `os` | positional | yes | `linux`, `darwin`, `windows`, `any` | `any` is checked last, after all OS-specific rows fail to resolve |
+| `manager` | positional | only in long form | `apt`, `dnf`, `pacman`, `brew`, `vcpkg`, ... | omitted in short form — the OS's default manager is used |
+| `name` | positional | yes | string, no spaces | the package name *as that specific manager* names it — not necessarily the real link name |
+| `version` | positional | optional | string, no spaces | omitted = "whatever the manager currently has"; present = hard pin |
+| `link` | named (`link=...`) | optional | comma-separated list of library names, no spaces | the actual name(s) passed to the linker (`-l<name>`). Defaults to the `pkg` block's logical name (the header, e.g. `sqlite3`) when omitted. Comma-separated for packages that produce multiple linkable libraries (e.g. openssl → `ssl`, `crypto`). |
 
 ### 2.3 Default managers per OS (short form)
 
@@ -145,7 +148,7 @@ Given a build target's OS:
   where pinning isn't reliably honorable without extra tooling), not a
   default to fall into casually.
 
-### 2.6 Fetch/vendor behavior
+### 2.6 Fetch/vendor/link behavior
 
 Resolution never mutates the host system (no `apt install`, no `brew
 install`). The compiler driver downloads the package manager's artifact
@@ -163,6 +166,14 @@ directly:
   cross-platform coverage gaps, e.g. Windows, or libraries with no native
   packaging.)
 
+After vendoring, the artifact is linked using `link`'s value(s) — one
+`-l<name>` per comma-separated entry — rather than any name derived from
+the package's manager-specific naming. If `link` is omitted, the `pkg`
+block's logical name is used as the sole link name. If the vendored
+artifact contains no `.so`/`.a` matching the resolved link name(s), this is
+a compile-time error raised at resolve time, not a deferred failure at the
+final link step.
+
 No `sudo`, no global state. Two checkouts of the same project resolve to
 the same vendored artifacts given the same `vs.mod`.
 
@@ -176,27 +187,27 @@ the same vendored artifacts given the same `vs.mod`.
 require github.com/someone/vertex-json v1.0.0
 
 pkg sqlite3 (
-    linux   apt    libsqlite3-dev 3.45.0-1
+    linux   apt    libsqlite3-dev 3.45.0-1  link=sqlite3
     darwin  brew   sqlite3        3.45.0
     windows vcpkg  sqlite3        3.45.0
 )
 
 pkg openssl (
-    linux apt    libssl-dev 3.0.2-0ubuntu1
-    linux vcpkg  openssl    3.2.0
-    darwin brew  openssl@3  3.2.0
+    linux  apt   libssl-dev 3.0.2-0ubuntu1  link=ssl,crypto
+    linux  vcpkg openssl    3.2.0           link=ssl,crypto
+    darwin brew  openssl@3  3.2.0           link=ssl,crypto
 )
 
 pkg zlib (
-    linux  zlib1g-dev 1:1.3.dfsg-3.1
-    darwin zlib
+    linux  apt  zlib1g-dev 1:1.3.dfsg-3.1  link=z
+    darwin brew zlib
 )
 ```
 
 Corresponding imports:
 
 ```vertex
-import vjson "github.com/someone/vertex-json"
+import vjson   "github.com/someone/vertex-json"
 import sqlite3 "pkg/lib/sqlite3"
 import openssl "pkg/lib/openssl"
 import zlib    "pkg/lib/zlib"
@@ -213,8 +224,10 @@ require     := "require" modulePath version
 
 pkg         := "pkg" identifier "(" providerRow+ ")"
 
-providerRow := osTag identifier version?              // short form
-             | osTag manager identifier version?      // long form
+providerRow := osTag identifier version? linkField?         // short form
+             | osTag manager identifier version? linkField? // long form
+
+linkField   := "link=" identifier ("," identifier)*
 
 osTag       := "linux" | "darwin" | "windows" | "any"
 manager     := "apt" | "dnf" | "pacman" | "brew" | "vcpkg" | identifier
@@ -225,4 +238,5 @@ modulePath  := stringToken    // import-path convention, §34
 Formatting (column alignment, spacing) is not part of the grammar — `vs
 fmt` is expected to canonicalize alignment the same way `gofmt` canonicalizes
 `go.mod`, so hand-typed unaligned input is always acceptable as long as
-tokens are whitespace-separated and each row ends at a newline.
+tokens are whitespace-separated, `link=...` (when present) is the last
+token on the line, and each row ends at a newline.
