@@ -12,8 +12,8 @@ not covered here), not a reason to grow this grammar.
 1. **Vertex packages** — ordinary `require` entries, identical in spirit to
    `go.mod`'s `require`.
 2. **Native/system packages** — `pkg` blocks, for C libraries fetched
-   through a system package manager (apt, brew, dnf, pacman, vcpkg, ...)
-   rather than written in Vertex.
+   through a system package manager (apt, brew, dnf, pacman, vcpkg, ...) or,
+   for a small set of compiler-bundled libraries, a `builtin` recipe.
 
 ---
 
@@ -74,8 +74,8 @@ manager:
 ```
 
 **Long form** (4 positional fields) — explicit manager, required when more
-than one provider exists for the same OS, or when the default manager
-isn't wanted:
+than one provider exists for the same OS, when the default manager isn't
+wanted, or when using `builtin`:
 
 ```
 <os> <manager> <name> <version> [link=<libname>[,<libname>...]]
@@ -102,9 +102,9 @@ pkg openssl (
 | Field | Form | Required | Values | Notes |
 |---|---|---|---|---|
 | `os` | positional | yes | `linux`, `darwin`, `windows`, `any` | `any` is checked last, after all OS-specific rows fail to resolve |
-| `manager` | positional | only in long form | `apt`, `dnf`, `pacman`, `brew`, `vcpkg`, ... | omitted in short form — the OS's default manager is used |
-| `name` | positional | yes | string, no spaces | the package name *as that specific manager* names it — not necessarily the real link name |
-| `version` | positional | optional | string, no spaces | omitted = "whatever the manager currently has"; present = hard pin |
+| `manager` | positional | only in long form | `apt`, `dnf`, `pacman`, `brew`, `vcpkg`, `builtin`, ... | omitted in short form — the OS's default manager is used. `builtin` always requires long form. |
+| `name` | positional | yes | string, no spaces | the package name *as that specific manager* names it — not necessarily the real link name. For `builtin`, this is the recipe's registered name (e.g. `cef`), not a package-manager-specific string. |
+| `version` | positional | optional | string, no spaces | omitted = "whatever the manager currently has"; present = hard pin. For `builtin`, each recipe defines its own accepted version format and validates it before fetching. |
 | `link` | named (`link=...`) | optional | comma-separated list of library names, no spaces | the actual name(s) passed to the linker (`-l<name>`). Defaults to the `pkg` block's logical name (the header, e.g. `sqlite3`) when omitted. Comma-separated for packages that produce multiple linkable libraries (e.g. openssl → `ssl`, `crypto`). |
 
 ### 2.3 Default managers per OS (short form)
@@ -122,7 +122,52 @@ Users on Fedora/Arch/Alpine must use long form (`linux dnf ...`,
 because silent manager substitution is exactly the unpredictable-build
 failure mode this format exists to avoid.
 
-### 2.4 Resolution order
+`builtin` is never a default manager for any OS — it is never selected by
+short form. It must always be written explicitly in long form.
+
+### 2.4 `builtin` — compiler-bundled recipes
+
+For a small set of popular C/C++ libraries with build pipelines too
+involved to express as a normal `pkg` row pointed at a system package
+manager (multi-stage cross-compilation, vendor-specific CDN artifacts,
+unusual archive layouts, etc.), the compiler ships a hardcoded fetch/
+extract/link recipe in Go, identified by `manager = builtin`:
+
+```
+pkg cef (
+    linux   builtin cef 120.1.10+g3ce4d96+chromium-120.0.6099.129  link=cef
+    darwin  builtin cef 120.1.10+g3ce4d96+chromium-120.0.6099.129  link=cef
+    windows builtin cef 120.1.10+g3ce4d96+chromium-120.0.6099.129  link=cef
+)
+```
+
+**Rules:**
+
+* `builtin` rows are always long form; `name` selects a recipe from an
+  internal registry maintained in the compiler source, not an arbitrary
+  string. If `name` has no matching registered recipe, this is a hard
+  compile error — there is no silent fallback to another manager.
+* A recipe owns its own fetch logic end to end (URL construction,
+  download, checksum verification, archive extraction into the shared
+  vendor folder, link-name resolution) the same way the apt/brew/vcpkg
+  paths in §2.6 do, but without querying any external package database —
+  the recipe itself *is* the resolution logic.
+* Version pinning (§2.5) still applies: the version string is a hard
+  requirement, validated against whatever format that specific recipe
+  expects. A version the recipe doesn't recognize or can't fetch is a hard
+  build error, never a silent substitution.
+* The set of available `builtin` recipes is tied to the compiler version,
+  not the project's `vs.mod`. Upgrading the compiler can add or remove
+  `builtin` names; a `vs.mod` that resolved cleanly on one compiler version
+  may need to switch a library to a normal `pkg`/manager-based row (or pin
+  an older compiler) if a recipe is later removed.
+* `builtin` should stay reserved for genuinely popular, broadly-shared
+  libraries (CEF being the canonical example). It is not a general escape
+  hatch for project-specific or rarely-used native dependencies — those
+  belong in an imperative `build.vs` script instead, per the philosophy at
+  the top of this document.
+
+### 2.5 Resolution order
 
 Given a build target's OS:
 
@@ -137,18 +182,22 @@ Given a build target's OS:
 4. If nothing matches, this is a hard compile error — there is no silent
    "skip the dependency" behavior.
 
-### 2.5 Version pinning
+### 2.6 Version pinning
 
 * A `version` field, when present, is a hard requirement. If the named
   manager cannot fulfill that exact version (the repo has moved on, no
   versions tap configured, etc.), this is a **hard build error**, never a
-  silent substitution of a different version.
+  silent substitution of a different version. For `builtin`, "cannot
+  fulfill" means the recipe's own validation/fetch logic rejects or fails
+  to locate that version.
 * Omitting `version` is an explicit opt-out of pinning for that provider
   row — accepted as a deliberate tradeoff (e.g. for managers like Homebrew
   where pinning isn't reliably honorable without extra tooling), not a
-  default to fall into casually.
+  default to fall into casually. `builtin` recipes may choose to require a
+  version always, since they have no "whatever the manager currently has"
+  fallback to lean on.
 
-### 2.6 Fetch/vendor/link behavior
+### 2.7 Fetch/vendor/link behavior
 
 Resolution never mutates the host system (no `apt install`, no `brew
 install`). The compiler driver downloads the package manager's artifact
@@ -165,6 +214,10 @@ directly:
   native-manager provider row when one exists and reserve vcpkg for
   cross-platform coverage gaps, e.g. Windows, or libraries with no native
   packaging.)
+* `builtin` → the registered Go recipe performs its own fetch (typically a
+  direct download from a fixed, vendor-specific URL pattern), verifies the
+  artifact, and extracts into the same project-local vendor folder. No
+  package manager is consulted at all.
 
 After vendoring, the artifact is linked using `link`'s value(s) — one
 `-l<name>` per comma-separated entry — rather than any name derived from
@@ -172,10 +225,11 @@ the package's manager-specific naming. If `link` is omitted, the `pkg`
 block's logical name is used as the sole link name. If the vendored
 artifact contains no `.so`/`.a` matching the resolved link name(s), this is
 a compile-time error raised at resolve time, not a deferred failure at the
-final link step.
+final link step. This applies equally to `builtin`-sourced artifacts.
 
 No `sudo`, no global state. Two checkouts of the same project resolve to
-the same vendored artifacts given the same `vs.mod`.
+the same vendored artifacts given the same `vs.mod` and the same compiler
+version.
 
 ---
 
@@ -202,6 +256,12 @@ pkg zlib (
     linux  apt  zlib1g-dev 1:1.3.dfsg-3.1  link=z
     darwin brew zlib
 )
+
+pkg cef (
+    linux   builtin cef 120.1.10+g3ce4d96+chromium-120.0.6099.129  link=cef
+    darwin  builtin cef 120.1.10+g3ce4d96+chromium-120.0.6099.129  link=cef
+    windows builtin cef 120.1.10+g3ce4d96+chromium-120.0.6099.129  link=cef
+)
 ```
 
 Corresponding imports:
@@ -211,6 +271,7 @@ import vjson   "github.com/someone/vertex-json"
 import sqlite3 "pkg/lib/sqlite3"
 import openssl "pkg/lib/openssl"
 import zlib    "pkg/lib/zlib"
+import cef     "pkg/lib/cef"
 ```
 
 ---
@@ -230,10 +291,16 @@ providerRow := osTag identifier version? linkField?         // short form
 linkField   := "link=" identifier ("," identifier)*
 
 osTag       := "linux" | "darwin" | "windows" | "any"
-manager     := "apt" | "dnf" | "pacman" | "brew" | "vcpkg" | identifier
+manager     := "apt" | "dnf" | "pacman" | "brew" | "vcpkg" | "builtin" | identifier
 version     := stringToken    // no ranges, no semver operators
 modulePath  := stringToken    // import-path convention, §34
 ```
+
+`builtin` is syntactically just another `manager` value — it requires no
+grammar changes — but semantically it never participates in short-form
+default resolution (§2.3) and its `name` values are resolved against a
+fixed, compiler-internal registry rather than an external package
+database (§2.4).
 
 Formatting (column alignment, spacing) is not part of the grammar — `vs
 fmt` is expected to canonicalize alignment the same way `gofmt` canonicalizes
