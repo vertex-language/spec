@@ -15,10 +15,10 @@
 
 ## 2. Execution Modifiers (Prefix Sigils)
 
-​```vertex
+```vertex
 let a = async fetch_network(id: 1)
 let b = thread heavy_compute(data: x)
-​```
+```
 
 * `thread` and `async` are mutually exclusive prefixes on a call expression, not function qualifiers.
 * The same function, written once with no qualifier, may be called with either sigil at different call sites.
@@ -30,17 +30,17 @@ let b = thread heavy_compute(data: x)
 
 ### Path A: The Single-Return (Auto-Channeling)
 
-​```vertex
+```vertex
 let worker = thread func(seed: int32) -> float32 {
     return crunch_numbers(seed)
 }(105)
 
 let final_data = worker.receive()
-​```
+```
 
 ### Path B: The Stream (Explicit Channels)
 
-​```vertex
+```vertex
 let out_stream: chan float32 = {cap: 64}
 
 thread func(data: [float32], ch: chan float32) {
@@ -53,7 +53,7 @@ thread func(data: [float32], ch: chan float32) {
 while let chunk = out_stream.tryReceive() {
     print(chunk)
 }
-​```
+```
 
 ---
 
@@ -61,7 +61,7 @@ while let chunk = out_stream.tryReceive() {
 
 ### 4.1 Channel Initialization
 
-​```vertex
+```vertex
 // unbuffered — blocks on send until receiver is ready
 let ch1: chan float32 = {}
 
@@ -70,23 +70,23 @@ let ch2: chan int32 = {cap: 64}
 
 // pointer type — type annotation left, initializer right, no ambiguity
 let ch3: chan *const char = {cap: 32}
-​```
+```
 
 ### 4.2 Channel API
 
-​```vertex
+```vertex
 ch.send(val)          // blocking send — waits if buffer is full
 ch.receive()          // blocking receive — waits until a value arrives
 ch.trySend(val)       // non-blocking send — returns bool, false if full
 ch.tryReceive()       // non-blocking receive — returns immediately
 ch.close()            // closes the channel, signals no more values
-​```
+```
 
-​```vertex
+```vertex
 if let val = ch.tryReceive() {
     print(val)
 }
-​```
+```
 
 | Method | Blocking | Returns |
 |---|---|---|
@@ -100,7 +100,7 @@ if let val = ch.tryReceive() {
 
 ## 5. Multiplexing (`select` and Polling)
 
-​```vertex
+```vertex
 let task1 = thread crunch_data()
 let task2 = thread fetch_network()
 
@@ -116,9 +116,9 @@ while waiting {
         runtime.yield()
     }
 }
-​```
+```
 
-​```vertex
+```vertex
 select {
 case a = task1.receive():
     print("Task 1 done")
@@ -128,4 +128,4 @@ default:
     // adding 'default' makes the select instantly non-blocking
     print("Doing other work...")
 }
-​```
+```

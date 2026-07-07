@@ -6,9 +6,9 @@
 
 ## 1. GPU Extension
 
-​```vertex
+```vertex
 let d = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
-​```
+```
 
 * `gpu` sigil, optional config `(blocks: n, threads: n)` → compiles to PTX/SPIR-V.
 * Function body is ordinary Vertex — no restricted types/constructs.
@@ -18,7 +18,7 @@ let d = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
 
 ## 2. TPU Extension
 
-​```vertex
+```vertex
 func vecAdd(a: tensor<float32; 1024>, b: tensor<float32; 1024>) -> tensor<float32; 1024> {
     return a + b
 }
@@ -27,7 +27,7 @@ var ha: [float32; 1024]
 var hb: [float32; 1024]
 
 let sum = tpu vecAdd(ha, hb)   // sum: [float32; 1024]
-​```
+```
 
 `tpu` sigil channels a host array call into a `tensor`-typed function body, and channels the `tensor` result back to a plain host array — same return-type-channeling rule as `gpu`.
 

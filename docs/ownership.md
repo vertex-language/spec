@@ -23,7 +23,7 @@ inspect(w)
 ### 2.1 Declaration
 
 ```vertex
-func rename(mut w: Widget, tag: string) {
+func rename(w: mut Widget, tag: string) {
     w.log.push(tag)
 }
 ```
@@ -210,7 +210,7 @@ func archive(w: Widget&) { }
 var w = Widget(1)
 archive(w)          // error: consume parameter requires `&`
 
-func rename(mut w: Widget) { }
+func rename(w: mut Widget) { }
 
 var v = Widget(1)
 rename(v)           // error: mut parameter requires `mut` at call site
@@ -221,12 +221,72 @@ rename(v)           // error: mut parameter requires `mut` at call site
 ## 9. Exclusivity
 
 ```vertex
-func both(mut a: Widget, mut b: Widget) { }
+func both(a: mut Widget, b: mut Widget) { }
 
 var w = Widget(1)
 both(mut w, mut w)   // error: `w` passed as two mut arguments
 
-func readAndMut(a: Widget, mut b: Widget) { }
+func readAndMut(a: Widget, b: mut Widget) { }
 
 readAndMut(w, mut w) // error: `w` read while mut-borrowed
+```
+
+---
+
+## 10. Weak References (`shared<T>` only)
+
+### 10.1 Construction
+
+```vertex
+var a = shared(Widget(1))
+var w = weak(a)              // borrow — `a` unaffected
+```
+
+### 10.2 Type Form
+
+```vertex
+var w: weak<Widget> = weak(a)
+
+func track(w: weak<Widget>) {
+}
+```
+
+### 10.3 Upgrade
+
+```vertex
+if let s = w.upgrade() {     // s: shared<Widget>
+    inspect(s)
+}
+
+let s = w.upgrade() ?? fallback
+```
+
+### 10.4 Dead Weak
+
+```vertex
+var a = shared(Widget(1))
+var w = weak(a)
+
+drop(a&)
+
+if let s = w.upgrade() {
+    // not reached — no strong owners remain
+}
+```
+
+### 10.5 Conventions
+
+```vertex
+inspect2(w)           // read — bare, no sigil
+retarget(mut w)       // mutate — rebind to another target
+consume(w&)           // consume — moves the weak handle
+```
+
+### 10.6 Illegal Forms
+
+```vertex
+var u = Widget(1)
+var w = weak(u)       // error: `weak` requires shared<Widget>, found Widget
+
+let s = w.value       // error: weak<Widget> has no direct access — upgrade first
 ```
