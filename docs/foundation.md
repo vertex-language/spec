@@ -204,12 +204,21 @@ a || b
 
 ---
 
-## 13. Range Operators
+## 13. Ranges
 
 ```vertex
-0..5     // exclusive: 0,1,2,3,4
-0..=5    // inclusive: 0,1,2,3,4,5
+0..5                     // 0,1,2,3,4 — always exclusive
+a..b                     // empty when a >= b
+
+let r = 0..10            // ranges are values
+let r2: range<int32> = 0..limit
+
+r.contains(3)            // true
+
+check_bounds(0..n)       // passable like any value
 ```
+
+> There is no inclusive form. To cover the full domain of a small integer type, iterate a wider type: `for i in 0..256 { let b = i as uint8 }`
 
 ---
 
@@ -235,14 +244,14 @@ a !== b
 | Level   | Operators                         |
 |---------|-----------------------------------|
 | Highest | `<<` `>>`                         |
-|         | `*` `/` `%` `&*`                  |
-|         | `+` `-` `&+` `&-`                 |
-|         | `...` `..<`                       |
+|         | `*` `/` `%` `&` `&*`              |
+|         | `+` `-` `\|` `^` `&+` `&-`        |
+|         | `..`                              |
 |         | `??`                              |
-|         | `==` `!=` `<` `>` `<=` `>=`      |
+|         | `==` `!=` `<` `>` `<=` `>=`       |
 |         | `&&`                              |
 |         | `\|\|`                            |
-| Lowest  | `=` `+=` `-=` `*=` `/=` `%=`     |
+| Lowest  | `=` `+=` `-=` `*=` `/=` `%=`      |
 
 ---
 
@@ -298,15 +307,16 @@ default:
 ## 19. Break and Continue
 
 ```vertex
-for i in 0..<10 {
+for i in 0..10 {
     if i % 2 == 0 { continue }
     if i == 7     { break }
 }
 
-var n = 0
-while true {
-    if n >= 5 { break }
-    n += 1
+outer: for i in 0..10 {
+    for j in 0..10 {
+        if grid[i][j] == target { break outer }
+        if j > i                { continue outer }
+    }
 }
 ```
 
@@ -341,23 +351,94 @@ var i = 0
 while i < 5 {
     i += 1
 }
+
+// stepping and reversal are while loops — no range methods
+var j = 100
+while j > 0 {
+    j -= 10
+}
+
+// condition may bind — loops while non-nil
+while let job = queue.pop() {
+    run(job)
+}
 ```
 
 ---
 
 ## 22. For-In Loop
 
+One loop shape: `for` consumes an iterable value. Ranges, arrays, maps, and strings are the iterables.
+
+### 22.1 Ranges
+
 ```vertex
 for i in 0..5 {
-    // 0,1,2,3,4
 }
 
-for i in 0..=5 {
-    // 0,1,2,3,4,5
+for i in start..end {
 }
+```
 
+### 22.2 Arrays
+
+```vertex
 let nums = [1, 2, 3]
-for n in nums {
+
+for n in nums {              // shared access
+}
+
+for n in mut nums {          // exclusive access — mutate in place
+    n *= 2
+}
+
+for i, n in nums {           // index + value
+}
+
+for f in own frames {        // consuming — moves elements out,
+    q.submit(f)              // container dead after the loop
+}
+```
+
+### 22.3 Maps
+
+```vertex
+let config = {"debug": 1, "verbose": 0}
+
+for k, v in config {         // key + value, order unspecified
+}
+
+for k in config.keys() {
+}
+
+for v in config.values() {
+}
+```
+
+### 22.4 Strings
+
+```vertex
+for c in "héllo" {           // c: char — Unicode scalars
+}
+
+for b in s.bytes() {         // b: uint8 — raw UTF-8
+}
+```
+
+### 22.5 Slicing (ranges in bracket position)
+
+```vertex
+let head = buf[0..4]         // shared-access view {ptr, len}
+let tail = items[n..items.length]
+```
+
+### 22.6 Switch (ranges in case position)
+
+```vertex
+switch code {
+case 0..100:
+case 100..200:
+default:
 }
 ```
 
@@ -891,8 +972,6 @@ run(mut total, func(n: mut int32) {
     n += 10           // total is now 10
 })
 ```
-
-Right — package comes first, then build tags. Here's the corrected section:
 
 ---
 

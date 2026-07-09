@@ -67,9 +67,6 @@ let ch1: chan float32 = {}
 
 // buffered — capacity set via cap field
 let ch2: chan int32 = {cap: 64}
-
-// pointer type — type annotation left, initializer right, no ambiguity
-let ch3: chan *const char = {cap: 32}
 ```
 
 ### 4.2 Channel API
