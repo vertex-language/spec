@@ -7,7 +7,7 @@
 ## 1. The Execution Reality Map
 
 | Prefix Sigil | The Vertex Abstraction |
-|---|---|
+| --- | --- |
 | `thread` | Shared-memory concurrency |
 | `async` | State machine, scheduler-driven |
 
@@ -18,6 +18,7 @@
 ```vertex
 let a = async fetch_network(id: 1)
 let b = thread heavy_compute(data: x)
+
 ```
 
 * `thread` and `async` are mutually exclusive prefixes on a call expression, not function qualifiers.
@@ -36,23 +37,29 @@ let worker = thread func(seed: int32) -> float32 {
 }(105)
 
 let final_data = worker.receive()
+
 ```
 
 ### Path B: The Stream (Explicit Channels)
 
 ```vertex
-let out_stream: chan float32 = {cap: 64}
+let out_stream: chan float32 = new(chan float32, 64)
 
-thread func(data: [float32], ch: chan float32) {
+thread func(data: []float32, ch: chan float32) {
     for chunk in data {
         ch.send(process(chunk))
     }
     ch.close()
 }(dataset, out_stream)
 
-while let chunk = out_stream.tryReceive() {
+while true {
+    let chunk, err = out_stream.tryReceive()
+    if err != "" {
+        break 
+    }
     print(chunk)
 }
+
 ```
 
 ---
@@ -63,10 +70,11 @@ while let chunk = out_stream.tryReceive() {
 
 ```vertex
 // unbuffered — blocks on send until receiver is ready
-let ch1: chan float32 = {}
+let ch1: chan float32 = new(chan float32)
 
-// buffered — capacity set via cap field
-let ch2: chan int32 = {cap: 64}
+// buffered — capacity passed as a second argument
+let ch2: chan int32 = new(chan int32, 64)
+
 ```
 
 ### 4.2 Channel API
@@ -77,20 +85,23 @@ ch.receive()          // blocking receive — waits until a value arrives
 ch.trySend(val)       // non-blocking send — returns bool, false if full
 ch.tryReceive()       // non-blocking receive — returns immediately
 ch.close()            // closes the channel, signals no more values
+
 ```
 
 ```vertex
-if let val = ch.tryReceive() {
+let val, err = ch.tryReceive()
+if err == "" {
     print(val)
 }
+
 ```
 
 | Method | Blocking | Returns |
-|---|---|---|
+| --- | --- | --- |
 | `.send(value)` | yes | `void` |
 | `.receive()` | yes | `T` |
 | `.trySend(v)` | no | `bool` |
-| `.tryReceive()` | no | `T?` |
+| `.tryReceive()` | no | `(T, string)` |
 | `.close()` | no | `void` |
 
 ---
@@ -103,16 +114,23 @@ let task2 = thread fetch_network()
 
 var waiting = true
 while waiting {
-    if let a = task1.tryReceive() {
+    let a, err1 = task1.tryReceive()
+    if err1 == "" {
         print("Task 1 done")
         waiting = false
-    } else if let b = task2.tryReceive() {
+        continue
+    } 
+    
+    let b, err2 = task2.tryReceive()
+    if err2 == "" {
         print("Task 2 done")
         waiting = false
-    } else {
-        runtime.yield()
+        continue
     }
+    
+    runtime.yield()
 }
+
 ```
 
 ```vertex
@@ -125,4 +143,5 @@ default:
     // adding 'default' makes the select instantly non-blocking
     print("Doing other work...")
 }
+
 ```

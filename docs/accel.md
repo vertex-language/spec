@@ -19,33 +19,33 @@ let d = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
 ## 2. TPU Extension
 
 ```vertex
-func vecAdd(a: tensor<float32; 1024>, b: tensor<float32; 1024>) -> tensor<float32; 1024> {
+func vecAdd(a: tensor[float32, 1024], b: tensor[float32, 1024]) -> tensor[float32, 1024] {
     return a + b
 }
 
-var ha: [float32; 1024]
-var hb: [float32; 1024]
+var ha: [1024]float32
+var hb: [1024]float32
 
-let sum = tpu vecAdd(ha, hb)   // sum: [float32; 1024]
+let sum = tpu vecAdd(ha, hb)   // sum: [1024]float32
 ```
 
 `tpu` sigil channels a host array call into a `tensor`-typed function body, and channels the `tensor` result back to a plain host array — same return-type-channeling rule as `gpu`.
 
-### 2.1 `tensor<ElementType; Shape>`
+### 2.1 `tensor[ElementType, Shape...]`
 
 * Valid only inside a `tpu`-sigil function body.
 * **Signature-eligible:** `float32`, `int8`. **Body-only:** `bf16`, `fp8e4m3`, `fp8e5m2`, `int4`.
-* **Shape:** one or more compile-time integer literals.
+* **Shape:** one or more compile-time integer literals, following `ElementType` in the same bracketed, comma-separated list — `tensor[float32, 1024]` (1-D), `tensor[float32, 16, 16]` (2-D), and so on.
 * No subscripting (`a[i]` is a compile error) — element access only via elementwise ops and `tpu.` calls.
 
 ### 2.2 Elementwise Operators
 
-`+ - * /` unary `-`; comparisons `== != < <= > >=` → `tensor<bool; Shape>`. Operands must share element type and shape.
+`+ - * /` unary `-`; comparisons `== != < <= > >=` → `tensor[bool, Shape...]`. Operands must share element type and shape.
 
 ### 2.3 Casting & Quantization
 
 * Plain casts (e.g. `bf16(val)`) saturate on overflow into `int8`/`int4`.
-* `tpu.Quantize<T>(a, scale)` / `tpu.Dequantize<T>(a, scale)` — scalar-scaled conversion between `float32` and `int8`/`fp8`/`int4`.
+* `tpu.Quantize[T](a, scale)` / `tpu.Dequantize[T](a, scale)` — scalar-scaled conversion between `float32` and `int8`/`fp8`/`int4`.
 
 ### 2.4 `tpu.` Builtin Namespace (reference)
 
@@ -62,3 +62,4 @@ let sum = tpu vecAdd(ha, hb)   // sum: [float32; 1024]
 
 * `if`/`else if`/`else`/`switch`: condition/selector must be scalar (`bool`/`int32`) — no per-element branching, use `tpu.Select`.
 * `while`: loop-carried bindings must keep identical type/shape/element type each iteration. `break`/`continue` are compile errors.
+```

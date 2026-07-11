@@ -1,6 +1,6 @@
 # Vertex Language Grammar
 
-## Specification 2.2 — Foundation
+## Grammar - Foundation
 
 ---
 
@@ -209,28 +209,13 @@ a || b
 ```vertex
 0..5                     // 0,1,2,3,4 — always exclusive
 a..b                     // empty when a >= b
-
-let r = 0..10            // ranges are values
-let r2: range<int32> = 0..limit
-
-r.contains(3)            // true
-
-check_bounds(0..n)       // passable like any value
 ```
 
 > There is no inclusive form. To cover the full domain of a small integer type, iterate a wider type: `for i in 0..256 { let b = i as uint8 }`
 
 ---
 
-## 14. Nil-Coalescing
-
-```vertex
-a ?? b
-```
-
----
-
-## 15. Identity Operators (classes only)
+## 14. Identity Operators (classes only)
 
 ```vertex
 a === b
@@ -239,7 +224,7 @@ a !== b
 
 ---
 
-## 16. Operator Precedence (high → low)
+## 15. Operator Precedence (high → low)
 
 | Level   | Operators                         |
 |---------|-----------------------------------|
@@ -247,7 +232,6 @@ a !== b
 |         | `*` `/` `%` `&` `&*`              |
 |         | `+` `-` `\|` `^` `&+` `&-`        |
 |         | `..`                              |
-|         | `??`                              |
 |         | `==` `!=` `<` `>` `<=` `>=`       |
 |         | `&&`                              |
 |         | `\|\|`                            |
@@ -255,7 +239,7 @@ a !== b
 
 ---
 
-## 17. If / Else / Else If
+## 16. If / Else / Else If
 
 ```vertex
 if x > 0 {
@@ -266,7 +250,7 @@ if x > 0 {
 
 ---
 
-## 18. Switch
+## 17. Switch
 
 ```vertex
 switch x {
@@ -304,25 +288,18 @@ default:
 
 ---
 
-## 19. Break and Continue
+## 18. Break and Continue
 
 ```vertex
 for i in 0..10 {
     if i % 2 == 0 { continue }
     if i == 7     { break }
 }
-
-outer: for i in 0..10 {
-    for j in 0..10 {
-        if grid[i][j] == target { break outer }
-        if j > i                { continue outer }
-    }
-}
 ```
 
 ---
 
-## 20. Functions
+## 19. Functions
 
 ```vertex
 func add(a: int32, b: int32) -> int32 {
@@ -339,12 +316,18 @@ func increment(n: mut int32) {
 }
 
 var count = 0
-increment(mut count)
+increment(count)
 ```
+
+> Call sites for `mut`- and `var`-typed parameters are always bare —
+> never a keyword at the call site, whether the parameter is exclusive
+> access or ownership-transferring. See ownership.md §2 (`mut`) and §3
+> (`var`/`.transfer()`) for the full rules; this file only shows the
+> call-site shape.
 
 ---
 
-## 21. While Loop
+## 20. While Loop
 
 ```vertex
 var i = 0
@@ -358,19 +341,21 @@ while j > 0 {
     j -= 10
 }
 
-// condition may bind — loops while non-nil
-while let job = queue.pop() {
+// no value to bind against — loop on an explicit exit check instead
+while true {
+    let job, ok = queue.pop()
+    if !ok { break }
     run(job)
 }
 ```
 
 ---
 
-## 22. For-In Loop
+## 21. For-In Loop
 
 One loop shape: `for` consumes an iterable value. Ranges, arrays, maps, and strings are the iterables.
 
-### 22.1 Ranges
+### 21.1 Ranges
 
 ```vertex
 for i in 0..5 {
@@ -380,7 +365,7 @@ for i in start..end {
 }
 ```
 
-### 22.2 Arrays
+### 21.2 Arrays
 
 ```vertex
 let nums = [1, 2, 3]
@@ -388,19 +373,19 @@ let nums = [1, 2, 3]
 for n in nums {              // shared access
 }
 
-for n in mut nums {          // exclusive access — mutate in place
+for n in nums {          // exclusive access — mutate in place
     n *= 2
 }
 
 for i, n in nums {           // index + value
 }
 
-for f in own frames {        // consuming — moves elements out,
-    q.submit(f)              // container dead after the loop
+for f in frames.transfer() {    // consuming — moves elements out,
+    q.submit(f.transfer())      // container dead after the loop
 }
 ```
 
-### 22.3 Maps
+### 21.3 Maps
 
 ```vertex
 let config = {"debug": 1, "verbose": 0}
@@ -415,7 +400,7 @@ for v in config.values() {
 }
 ```
 
-### 22.4 Strings
+### 21.4 Strings
 
 ```vertex
 for c in "héllo" {           // c: char — Unicode scalars
@@ -425,14 +410,14 @@ for b in s.bytes() {         // b: uint8 — raw UTF-8
 }
 ```
 
-### 22.5 Slicing (ranges in bracket position)
+### 21.5 Slicing (ranges in bracket position)
 
 ```vertex
 let head = buf[0..4]         // shared-access view {ptr, len}
 let tail = items[n..items.length]
 ```
 
-### 22.6 Switch (ranges in case position)
+### 21.6 Switch (ranges in case position)
 
 ```vertex
 switch code {
@@ -444,26 +429,26 @@ default:
 
 ---
 
-## 23. Arrays
+## 22. Arrays
 
-### 23.1 Fixed Arrays
+### 22.1 Fixed Arrays
 
 ```vertex
-var buf:  [uint8; 1024]
-var nums: [int32; 16]
+var buf:  [1024]uint8
+var nums: [16]int32
 
-var coords: [int32; 3] = [10, 20, 30]
+var coords: [3]int32 = [10, 20, 30]
 
 let nums  = [1, 2, 3]
-let flags: [uint8; 3] = [0xFF, 0x00, 0xAB]
+let flags: [3]uint8 = [0xFF, 0x00, 0xAB]
 
-let bytes: [uint8; 3] = [
+let bytes: [3]uint8 = [
     0xFF,
     0x00,
     0xAB,
 ]
 
-let matrix: [[float32; 2]; 2] = [
+let matrix: [2][2]float32 = [
     [0.0, 1.0],
     [1.0, 0.0],
 ]
@@ -474,20 +459,20 @@ buf[0]    = 255
 
 ---
 
-### 23.2 Dynamic Arrays
+### 22.2 Dynamic Arrays
 
 ```vertex
-var items:   [int32] = []
-var players: [Player] = []
-var buf:     [uint8] = []
+var items:   []int32 = []
+var players: []Player = []
+var buf:     []uint8 = []
 
 var scores = [10, 20, 30]
-var names: [string] = ["a", "b"]
+var names: []string = ["a", "b"]
 ```
 
 ---
 
-### 23.3 Add / Remove
+### 22.3 Add / Remove
 
 ```vertex
 items.push(42)
@@ -496,7 +481,7 @@ let last = items.pop()
 
 ---
 
-### 23.4 Access
+### 22.4 Access
 
 ```vertex
 let n    = items.length
@@ -506,7 +491,7 @@ items[0] = 99
 
 ---
 
-### 23.5 Struct Arrays
+### 22.5 Struct Arrays
 
 ```vertex
 struct Vec2 {
@@ -520,7 +505,7 @@ struct Player {
     health:   int32
 }
 
-var players: [Player] = []
+var players: []Player = []
 
 players.push(Player{
     id:       1,
@@ -534,15 +519,15 @@ players[0].health = 50
 
 ---
 
-## 24. Maps
+## 23. Maps
 
 ```vertex
 let somemap = {"a": 1, "b": 2}
 let val = somemap["a"]
 
-let typedMap: map<string, int32> = {"a": 1, "b": 2}
+let typedMap: map[string]int32 = {"a": 1, "b": 2}
 
-var config: map<string, int32> = {}
+var config: map[string]int32 = {}
 
 config["debug"]   = 1
 config["verbose"] = 0
@@ -551,22 +536,7 @@ config["debug"]   = nil
 
 ---
 
-## 25. Optionals
-
-```vertex
-var maybe: int32? = nil
-maybe = 5
-if let val = maybe {
-}
-
-var animal: Animal? = nil
-if let a = animal { }
-let result = animal ?? defaultAnimal
-```
-
----
-
-## 26. Structs
+## 24. Structs
 
 ```vertex
 struct Point {
@@ -603,7 +573,7 @@ let l = Line{
 
 ---
 
-## 27. Associated Functions (Receiver Syntax)
+## 25. Associated Functions (Receiver Syntax)
 
 ```vertex
 func (p: Point) describe() {
@@ -630,9 +600,9 @@ rex.rename(newName: "Max")
 
 ---
 
-## 28. Enums
+## 26. Enums
 
-### 28.1 Unit Variants
+### 26.1 Unit Variants
 
 ```vertex
 enum Direction {
@@ -663,7 +633,7 @@ case .West:
 
 ---
 
-### 28.2 Tuple Variants (positional associated data)
+### 26.2 Tuple Variants (positional associated data)
 
 ```vertex
 enum Shape {
@@ -737,7 +707,7 @@ default:
 
 ---
 
-### 28.3 Mixed Variants
+### 26.3 Mixed Variants
 
 ```vertex
 enum Message {
@@ -756,7 +726,7 @@ enum NetworkEvent {
 
 ---
 
-### 28.4 Explicit Discriminants
+### 26.4 Explicit Discriminants
 
 ```vertex
 enum Status : int32 {
@@ -789,19 +759,19 @@ let code = ErrorCode.Missing as uint16
 ```
 
 ```vertex
-func statusFromInt(n: int32) -> Status? {
+func statusFromInt(n: int32) -> Status {
     switch n {
     case 0: return .Inactive
     case 1: return .Active
     case 2: return .Pending
-    default: return nil
+    default: return .Inactive
     }
 }
 ```
 
 ---
 
-## 29. Classes
+## 27. Classes
 
 ```vertex
 class Animal {
@@ -820,7 +790,7 @@ let a = Animal(name: "Rex")
 
 ---
 
-## 30. Defer
+## 28. Defer
 
 ```vertex
 defer func() { cleanup(a) }()
@@ -831,9 +801,15 @@ defer cleanup(a)
 defer cleanup(b)
 ```
 
-## 31. Tuples
+## 29. Tuples
 
-### 31.1 Literals
+**Rule of thumb: parens build, bare commas unbuild.** Parens appear
+when a tuple is *constructed* — a literal or a type annotation. The
+moment a tuple is being *pulled apart* — a `let` destructure, or a
+`return` handing multiple values back — it is written bare, as a
+comma-separated list, with no wrapping parens.
+
+### 29.1 Literals — parens construct
 
 ```vertex
 let t = (1, "a")
@@ -841,14 +817,14 @@ let pair = (1, 2)
 let single = (1,)          // trailing comma required for 1-element tuples
 ```
 
-### 31.2 Type Annotations
+### 29.2 Type Annotations — parens are the type's shape
 
 ```vertex
 let t: (int32, string) = (1, "a")
 let coords: (float32, float32, float32) = (0.0, 1.0, 0.0)
 ```
 
-### 31.3 Positional Access
+### 29.3 Positional Access
 
 ```vertex
 let t = (1, "a")
@@ -856,7 +832,7 @@ let a = t.0
 let b = t.1
 ```
 
-### 31.4 Named Fields
+### 29.4 Named Fields (construction)
 
 ```vertex
 let t = (x: 1, y: "a")
@@ -866,25 +842,31 @@ let b = t.y
 let p: (x: int32, y: int32) = (x: 3, y: 4)
 ```
 
-### 31.5 Destructuring
+### 29.5 Destructuring — bare, no parens
 
 ```vertex
-let (a, b) = t
+let a, b = t              // pulls t apart into a, b
 
-let (x: px, y: py) = p   // rename on destructure
+let px, py = p             // positional destructure; use p.x / p.y directly
+                            // if you want field names preserved instead of
+                            // renaming on destructure
 ```
 
-### 31.6 Function Returns
+### 29.6 Function Returns — bare, no parens
 
 ```vertex
-func minMax(nums: [int32]) -> (int32, int32) {
-    return (nums[0], nums[0])
+func minMax(nums: []int32) -> (int32, int32) {
+    return nums[0], nums[0]
 }
 
-let (lo, hi) = minMax(nums)
+let lo, hi = minMax(nums)
 ```
 
-### 31.7 Nested Tuples
+The `-> (int32, int32)` in the signature is a type annotation (§29.2,
+parens required); the `return` statement inside is handing values
+back (§29.6, bare).
+
+### 29.7 Nested Tuples — parens construct, same as any literal
 
 ```vertex
 let t: ((int32, int32), string) = ((1, 2), "origin")
@@ -893,7 +875,7 @@ let inner = t.0.0
 
 ---
 
-## 32. Import Declarations
+## 30. Import Declarations
 
 ```vertex
 import "github.com/something"
@@ -906,7 +888,7 @@ import (
 
 ---
 
-## 33. First-Class Function Types
+## 31. First-Class Function Types
 
 ```vertex
 // variable holding a function
@@ -918,7 +900,7 @@ let transform: func(string, int32) -> string
 let onFire: func(int32)
 
 // function type as a parameter
-func apply(values: [int32], f: func(int32) -> int32) -> [int32] { }
+func apply(values: []int32, f: func(int32) -> int32) -> []int32 { }
 
 // function type as a return type
 func makeAdder(n: int32) -> func(int32) -> int32 { }
@@ -926,7 +908,7 @@ func makeAdder(n: int32) -> func(int32) -> int32 { }
 
 ---
 
-## 34. Anonymous Functions
+## 32. Anonymous Functions
 
 ```vertex
 // stored in a variable
@@ -964,18 +946,18 @@ Writeback via `mut` parameter:
 
 ```vertex
 func run(n: mut int32, f: func(mut int32)) {
-    f(mut n)          // n is already mut-bound — pass directly
+    f(n)              // n is already mut-bound — pass directly
 }
 
 var total = 0
-run(mut total, func(n: mut int32) {
+run(total, func(n: mut int32) {
     n += 10           // total is now 10
 })
 ```
 
 ---
 
-## 35. Package Declarations
+## 33. Package Declarations
 
 ```vertex
 package main
@@ -985,7 +967,7 @@ package somepackage2
 
 ---
 
-## 36. Build Tags
+## 34. Build Tags
 
 ```vertex
 build linux
@@ -1006,90 +988,108 @@ func platformInit() {
 }
 ```
 
-## 37. Error Handling
+## 35. Error Handling
 
-### 37.1 Convention
+### 35.1 Convention
+
+Every fallible or possibly-absent value is returned as a tuple: the
+value, and a string that is empty (`""`) on success. This is the only
+shape in the language for "this might not have worked" — there is no
+optional type and no propagation operator; see §29.6 for the bare
+tuple-return syntax this convention relies on.
 
 ```vertex
 func parseInt(s: string) -> (int32, string) {
-    if s == "" { return (0, "empty string") }
-    return (42, "")
+    if s == "" { return 0, "empty string" }
+    return 42, ""
 }
 
-func connect(host: string, port: uint16) -> ((), bool) {
-    if host == "" { return ((), false) }
-    return ((), true)
+func findUser(id: int32) -> (User, string) {
+    if id < 0 { return User{}, "invalid id" }
+    return User(id), ""
+}
+
+func connect(host: string, port: uint16) -> ((), string) {
+    if host == "" { return (), "empty host" }
+    return (), ""
 }
 ```
 
 ---
 
-### 37.2 Optionals
+### 35.2 Checking the Error — the only pattern
 
 ```vertex
-func findUser(id: int32) -> User? {
-    if id < 0 { return nil }
-    return User(id)
-}
-
-if let user = findUser(id: 1) { }
-let name = findUser(id: -1) ?? defaultUser
-```
-
----
-
-### 37.3 Destructuring
-
-```vertex
-let (n, err) = parseInt(s: "42")
+let n, err = parseInt(s: "42")
 if err != "" {
     log.printf("failed: %s\n", err)
+    return
+}
+// n is usable past this point
+```
+
+Every call site that can fail looks like this. The happy path
+continues directly below the check; nothing is hidden behind an
+operator.
+
+---
+
+### 35.3 Chaining Calls
+
+```vertex
+func loadModel(path: string) -> (Model, string) {
+    let text, err = readFile(path)
+    if err != "" {
+        return Model{}, err
+    }
+
+    let config, err2 = parseConfig(text)
+    if err2 != "" {
+        return Model{}, err2
+    }
+
+    return Model(config), ""
+}
+```
+
+Each step is a plain tuple destructure and a plain `if`. This does not
+get shorter as call depth grows — that is deliberate. Every branch is
+visible in the text.
+
+---
+
+### 35.4 Absence Is Not a Special Case
+
+A function that may find nothing uses the same shape a function that
+may fail uses:
+
+```vertex
+func findUser(id: int32) -> (User, string) {
+    if id < 0 { return User{}, "not found" }
+    return User(id), ""
+}
+
+let user, err = findUser(id: -1)
+if err != "" {
+    // handle "not found" exactly like any other error
 }
 ```
 
 ---
 
-### 37.4 Propagate — `?`
+### 35.5 Zero Values on the Error Path
 
-```vertex
-let n = parseInt(s: s)?
-```
-
----
-
-### 37.5 Happy Path — `if let`
-
-```vertex
-if let n = parseInt(s: "42") {
-}
-```
+When a function returns an error, the paired value is the type's zero
+value (`0`, `""`, a zero-valued struct/class) — never a
+partially-constructed value. Callers must check `err` before trusting
+the first return value; the compiler does not enforce this, matching
+the convention's philosophy of explicit-over-automatic.
 
 ---
 
-### 37.6 Both Paths — `else ->`
+## 36. Compiler Testing
 
-```vertex
-if let n = parseInt(s: "42") {
-} else -> err {
-    log.printf("failed: %s\n", err)
-}
-```
-
----
-
-### 37.7 Full Control — `switch`
-
-```vertex
-let (n, err) = parseInt(s: "42")
-switch err {
-case "":
-default:
-}
-```
-
-## 38. Compiler Testing
-
-### 38.1 The `test` Qualifier
+### 36.1 The `test` Qualifier
 
 ```vertex
 package arithmetic_test
@@ -1104,7 +1104,7 @@ func test_no_crash()   test                          { arithmetic.Square(n: 0) }
 
 ---
 
-### 38.2 `Expected`
+### 36.2 `Expected`
 
 ```vertex
 Expected(type, string_literal)
@@ -1121,7 +1121,7 @@ Expected(type, string_literal)
 
 ---
 
-### 38.3 `Expected(error)` — Compile-Failure Tests
+### 36.3 `Expected(error)` — Compile-Failure Tests
 
 ```vertex
 func test_bad_add() test -> Expected(error) {
@@ -1149,7 +1149,7 @@ Expected(error, string_literal)
 
 ---
 
-### 38.4 `build test`
+### 36.4 `build test`
 
 ```vertex
 package arithmetic_test
