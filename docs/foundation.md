@@ -88,6 +88,19 @@ let p: char = 'A'
 type size_t = uint64
 ```
 
+Here's a draft section for `foundation.md`. I'd slot it right after §4 (Type Aliases), since it's explicitly a carve-out from that rule.
+
+---
+
+## 4.1 `byte` — the Preferred Spelling for `uint8`
+
+```vertex
+let b: byte = 0xFF
+let b2: uint8 = b        // ok — no cast, either direction
+let raw: []byte = [0xFF, 0x00, 0xAB]
+let same: []uint8 = raw  // ok — same underlying type
+```
+
 ---
 
 ## 5. Type Variadic Args

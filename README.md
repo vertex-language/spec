@@ -4,8 +4,9 @@
 
 This repository contains the formal grammar specification for Vertex, a
 statically-typed systems language with explicit ownership sigils, a
-Rust/C++-flavored memory model, first-class concurrency primitives, and
-native hardware-acceleration extensions (GPU/TPU).
+C-flavored machine model (no GC, no vtables, no runtime type info),
+first-class concurrency primitives, native hardware-acceleration
+extensions (GPU/TPU), and a structural foreign-interop layer.
 
 This README is the top-level entry point. Detailed grammar lives under
 [`docs/`](docs/).
@@ -16,20 +17,22 @@ This README is the top-level entry point. Detailed grammar lives under
 
 | Doc | Covers |
 |---|---|
-| [`docs/foundation.md`](docs/foundation.md) | Literals, types, operators, control flow, functions, arrays, maps, optionals, structs, enums, classes, tuples, imports, first-class functions, error handling, compiler testing |
-| [`docs/ownership.md`](docs/ownership.md) | The borrow / `mut` / consume (`&`) model — pure grammar forms |
-| [`docs/ownership_semantics.md`](docs/ownership_semantics.md) | Same material as `ownership.md`, plus the C++/Rust lineage and rationale behind each sigil |
-| [`docs/concurrency.md`](docs/concurrency.md) | `thread` / `async` execution sigils, channels, `select` |
-| [`docs/generics.md`](docs/generics.md) | Generic functions, structs, enums, methods; unconstrained type parameters |
-| [`docs/ffi.md`](docs/ffi.md) | C interop grammar — opaque handles, pointer-shape mapping, flat ABI bindings |
-| [`docs/ffi_semantics.md`](docs/ffi_semantics.md) | Same material as `ffi.md`, plus the reasoning behind each interop form |
-| [`docs/accel.md`](docs/accel.md) | `gpu` / `tpu` sigils, the `tensor<ElementType; Shape>` type, and the `tpu.` builtin namespace |
+| [`docs/foundation.md`](docs/foundation.md) | Literals, types, operators, control flow, functions, closures, arrays, maps, structs, enums, classes, tuples, imports, error handling (`(T, string)` tuples), compiler testing |
+| [`docs/foundation_spec.md`](docs/foundation_spec.md) | The lowered view of the above — memory layout of every type, what `let`/`var` compile to, the calling conventions, and what the runtime does (almost nothing) |
+| [`docs/ownership.md`](docs/ownership.md) | The shared / `mut` / `var`+`.transfer()` model — grammar reference |
+| [`docs/ownership_spec.md`](docs/ownership_spec.md) | Same model, plus the root concepts (aliasing, mutation, liveness), the Law of Exclusivity, and the cost-model rationale behind each sigil |
+| [`docs/generics.md`](docs/generics.md) | Type parameter lists, constraints (type-set and method), the standard constraint library, instantiation/inference, monomorphization |
+| [`docs/concurrency.md`](docs/concurrency.md) | `thread` / `async` call-site sigils, auto-channeling single-return calls, explicit `chan T`, `select` |
+| [`docs/accel.md`](docs/accel.md) | `gpu` / `tpu` sigils, the `tensor[ElementType, Shape...]` type, and the `tpu.` builtin namespace |
+| [`docs/abstract_interfaces.md`](docs/abstract_interfaces.md) | Foreign interop grammar — `abstract` handles, the boundary tuple, structural ABI typing (flat vs. object APIs), safe wrapper classes |
+| [`docs/abstract_interfaces_spec.md`](docs/abstract_interfaces_spec.md) | Same material, plus the two-layer interop philosophy and the reasoning behind each mapping |
+| [`docs/memory.md`](docs/memory.md) | `typed_ptr T` — the raw, last-resort pointer: arithmetic, indexing, casting, `new`/`delete`/`resize`, `copy`/`zero`, `nil` |
 
-Files without a `_semantics` companion (`foundation.md`, `concurrency.md`,
-`generics.md`, `accel.md`) are self-contained — grammar and rationale
-inline. `ownership.md` / `ffi.md` are the terse grammar-only reference;
-their `_semantics` counterparts carry identical code samples plus the
-"why," including comparisons to C++ and Rust.
+Files without a `_spec` companion (`generics.md`, `concurrency.md`,
+`accel.md`) are self-contained — grammar and rationale inline.
+`foundation.md`/`ownership.md`/`abstract_interfaces.md` are the terse
+grammar-only reference; their `_spec` counterparts carry the same
+examples plus the "why" and the machine-level consequences.
 
 ---
 
@@ -38,54 +41,62 @@ their `_semantics` counterparts carry identical code samples plus the
 ### Bindings & Types
 
 ```vertex
-let x = 10          // immutable
-var y = 20           // mutable
-let a: int32 = 100    // explicit annotation
-type size_t = uint64  // alias
+let x = 10            // immutable
+var y = 20             // mutable
+let a: int32 = 100      // explicit annotation
+type size_t = uint64    // alias
+let b: byte = 0xFF      // byte is the preferred spelling for uint8
 ```
 
-Numeric types: `int8/16/32/64`, `uint8/16/32/64`, `float32/64`, plus
-`int`/`uint` general aliases. Casts via constructor call (`int32(x)`) or
-`as` (`x as int64`).
+Numeric types: `int8/16/32/64`, `uint8/16/32/64` (`byte` = `uint8`),
+`float32/64`, plus platform-width `int`/`uint`. Casts via constructor
+call (`int32(x)`) or `as` (`x as int64`).
 
-### Ownership — the borrow / `mut` / consume ladder
+### Ownership — shared / exclusive / owning
 
-Vertex's signature feature: every parameter's ownership *convention* is
-visible both in the function signature and, for anything beyond a plain
-read, at the call site too.
+Every parameter's convention is visible in the signature; only the
+owning convention also shows up at the call site.
 
 ```vertex
-func f1(x: T)     f1(x)          // read      — silent, default
-func f2(x: mut T)  f2(mut x)      // mutate    — marked both ends
-func f3(x: T&)     f3(x&)         // consume   — marked both ends, move-only
+func f1(x: T)           f1(x)                  // shared  — bare, always
+func f2(x: mut T)        f2(x)                  // exclusive — bare, checked via signature
+func f3(x: var T)        f3(x)  / f3(x.transfer())   // owning — COPY (bare) or TRANSFER (marked)
 ```
 
-See [`ownership.md`](docs/ownership.md) for the full ladder
-(receivers, `shared<T>`, conditional/loop move errors, exclusivity
-rules) and [`ownership_semantics.md`](docs/ownership_semantics.md)
-for why it's shaped this way relative to C++'s silent `T&` and Rust's
-silent moves.
+There's no `.clone()` — a bare hand-off to an owning parameter is a
+deep copy; `.transfer()` is the only marked operation, and it's O(1)
+(header only) versus a copy's O(data). `unique T` and `shared T` are
+the two heap doors; `weak T` observes a `shared T` without keeping it
+alive. See [`ownership.md`](docs/ownership.md) and
+[`ownership_spec.md`](docs/ownership_spec.md).
 
 ### Control Flow, Data Types, Errors
 
-Standard `if/else`, `switch` (with `fallthrough`), `while`, `for-in`,
-fixed/dynamic arrays, `map<K, V>`, `T?` optionals with `if let` /  `??`,
-`struct`/`enum` (unit, tuple, and mixed variants, explicit
-discriminants), `class` with `init`/`deinit`, and tuples (positional or
-named, with destructuring). Error handling favors return-based
-conventions (`(T, string)`, `T?`, `?` propagation, `if let ... else ->`)
-over exceptions. All detailed in
-[`foundation.md`](docs/foundation.md).
+Standard `if`/`else if`/`else`, `switch` (with `fallthrough`, range
+cases), `while`, one `for-in` form over ranges/arrays/maps/strings,
+fixed (`[N]T`) and dynamic (`[]T`) arrays, `map[K]V`, `struct`/`enum`
+(unit, tuple, and mixed variants, explicit discriminants), `class` with
+`init`/`deinit`, and tuples (positional or named; parens construct,
+bare commas destructure). There is no optional type and no exception
+unwinder — every fallible or possibly-absent value is a
+`(T, string)` boundary tuple, checked with a plain `if err != ""`. All
+detailed in [`foundation.md`](docs/foundation.md).
 
 ### Generics
 
-Unconstrained type parameters only — no `where` clauses, no trait
-bounds. Errors surface at instantiation, not declaration.
+Unconstrained by default (`[T]` means `[T: any]`); constraints are
+declared as their own type-set or method contracts, not interfaces.
+Vertex monomorphizes — every instantiation is a separate compiled
+body, so a generic that's never instantiated emits no code and an
+unsatisfied constraint is a compile error at the instantiation site.
 
 ```vertex
-func largest<T>(list: [T]) -> T { ... }
-struct Stack<T> { items: [T] = [] }
-enum Result<T, E> { Ok(T), Err(E) }
+func min[T: constraints.Ordered](a: T, b: T) -> T {
+    if a < b { return a }
+    return b
+}
+struct Pair[A, B] { first: A  second: B }
+enum Option[T] { None, Some(T) }
 ```
 
 See [`generics.md`](docs/generics.md).
@@ -98,43 +109,53 @@ let b = thread heavy_compute(data: x)
 ```
 
 `thread`/`async` are call-site sigils, not function qualifiers — the
-same function can be dispatched either way. Single-return calls
-auto-channel into a `.receive()`-able handle; streaming calls use
-explicit `chan T` channels with blocking/non-blocking send/receive and
-a Go-style `select`. See [`concurrency.md`](docs/concurrency.md).
+same function can be dispatched either way, or called synchronously
+with neither. A call returning `T` auto-channels into a
+`.receive()`-able handle; streaming work uses an explicit `chan[T]`
+with blocking/non-blocking send/receive and a Go-style `select`. See
+[`concurrency.md`](docs/concurrency.md).
 
 ### Hardware Acceleration
 
 ```vertex
-let d = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
-let sum = tpu vecAdd(ha, hb)   // tensor<float32; 1024> channeled to/from host array
+let d   = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
+let sum = tpu vecAdd(ha, hb)   // tensor[float32, 1024] channeled to/from host arrays
 ```
 
-`gpu` compiles ordinary Vertex to PTX/SPIR-V. `tpu` channels host
-arrays into `tensor<ElementType; Shape>`-typed function bodies, with a
-dedicated `tpu.` builtin namespace (math, contraction, selection,
-shape, reduction, constants) and restricted control flow (scalar-only
-conditions, no `break`/`continue` in `while`). See
-[`accel.md`](docs/accel.md).
+`gpu` compiles ordinary Vertex to PTX/SPIR-V with no restricted
+types. `tpu` channels host arrays into `tensor[ElementType, Shape...]`-
+typed function bodies, with a dedicated `tpu.` builtin namespace (math,
+contraction, selection, shape, reduction, constants) and restricted
+control flow (scalar-only conditions, no `break`/`continue` in
+`while`). See [`accel.md`](docs/accel.md).
 
-### FFI & Native Interop
+### Foreign Interop — Abstract Interfaces
 
-C interop with no raw pointers exposed to the programmer:
+No raw pointers exposed by default — a foreign resource is an opaque
+`abstract` handle, and a fallible foreign call maps to the same
+`(T, string)` boundary tuple used everywhere else in the language.
 
-| C shape | Vertex form |
-|---|---|
-| Opaque resource handle | `type X = unique` (linear, move-only) |
-| `const char*` | `cstr` |
-| `T*` scalar out-param | `mut T` |
-| `T**` (new owned object) | plain return `-> T?` |
-| `T*` + length | `[T]` / `mut [T]` |
+```vertex
+type SDL_Window = abstract
 
-Bindings are declared with the FFI-only `class X : lib_name { ... }`
-form (a stateless linker symbol table, *not* inheritance). See
-[`ffi.md`](docs/ffi.md) for the grammar and
-[`ffi_semantics.md`](docs/ffi_semantics.md) for the
-per-function decision rule (bare / `mut` / `&`) and callback trampoline
-handling.
+class SDL2_API : sdl2 {
+    func SDL_CreateWindow(title: string, x: int32, y: int32, w: int32, h: int32, flags: uint32)
+        -> (SDL_Window, string)
+    func SDL_DestroyWindow(window: SDL_Window)
+}
+```
+
+Whether an interface is a flat C-style namespace or an instantiable
+object (Objective-C, C++, JS) is inferred structurally from whether it
+declares any `init func` — no `objc`/`cpp`/`js` keyword needed. Ordinary
+Vertex wrapper classes hold the handle and manage its lifetime in
+`init`/`deinit`; the interface itself is declaration-only. For the
+residue an `abstract` handle and the safe pointer shapes (`mut T`,
+`[]T`) can't express, there's `typed_ptr T` — see
+[`memory.md`](docs/memory.md). See
+[`abstract_interfaces.md`](docs/abstract_interfaces.md) for the grammar
+and [`abstract_interfaces_spec.md`](docs/abstract_interfaces_spec.md)
+for the two-layer (interface vs. wrapper) reasoning.
 
 ---
 
@@ -143,14 +164,17 @@ handling.
 New to the grammar? Suggested path:
 
 1. `foundation.md` — core syntax and types
-2. `ownership_semantics.md` — the sigil system everything else builds on
+2. `ownership_spec.md` — the sigil system everything else builds on
 3. `generics.md` — how type parameters interact with ownership
-4. `concurrency.md` — thread/async sigils and channels
+4. `concurrency.md` — `thread`/`async` sigils and channels
 5. `accel.md` — GPU/TPU extensions (builds on ownership + generics)
-6. `ffi_semantics.md` — native interop (builds on ownership's `unique`/`mut`/`&`)
+6. `abstract_interfaces_spec.md` — foreign interop (builds on ownership's `mut`/`var`)
+7. `memory.md` — `typed_ptr T`, the raw-pointer escape hatch interop falls back to
+8. `foundation_spec.md` — the machine model everything above lowers to
 
 ## Versioning
 
 All documents in this repository are pinned to **Specification 2.2**.
-Section numbers are stable within a spec version and are cross-referenced
-across documents (e.g. `ownership.md §3`, `foundation.md §31.6`).
+Section numbers are stable within a spec version and are
+cross-referenced across documents (e.g. `ownership.md §3`,
+`foundation.md §35.2`, `memory.md §8`).
