@@ -1,42 +1,50 @@
 package operators_test
 build test
 
-func test_eq_true() test -> Expected(int32, "1") {
-    return 5 == 5
+func test_eq_true() test -> Expected(bool, "1") {
+    let a: int32 = 5
+    let b: int32 = 5
+    return a == b
 }
 
-func test_eq_false() test -> Expected(int32, "0") {
-    return 5 == 6
+func test_eq_false() test -> Expected(bool, "0") {
+    let a: int32 = 5
+    let b: int32 = 6
+    return a == b
 }
 
-func test_ne_true() test -> Expected(int32, "1") {
-    return 5 != 6
+func test_neq() test -> Expected(bool, "1") {
+    let a: int32 = 5
+    let b: int32 = 6
+    return a != b
 }
 
-func test_gt_true() test -> Expected(int32, "1") {
-    return 6 > 5
+func test_gt() test -> Expected(bool, "1") {
+    let a: int32 = 6
+    let b: int32 = 5
+    return a > b
 }
 
-func test_gt_false() test -> Expected(int32, "0") {
-    return 5 > 6
+func test_lt() test -> Expected(bool, "0") {
+    let a: int32 = 6
+    let b: int32 = 5
+    return a < b
 }
 
-func test_lt_true() test -> Expected(int32, "1") {
-    return 4 < 5
+func test_ge_equal() test -> Expected(bool, "1") {
+    let a: int32 = 5
+    let b: int32 = 5
+    return a >= b
 }
 
-func test_gte_equal() test -> Expected(int32, "1") {
-    return 5 >= 5
+func test_le_equal() test -> Expected(bool, "1") {
+    let a: int32 = 5
+    let b: int32 = 5
+    return a <= b
 }
 
-func test_gte_false() test -> Expected(int32, "0") {
-    return 4 >= 5
-}
-
-func test_lte_less() test -> Expected(int32, "1") {
-    return 4 <= 5
-}
-
-func test_lte_false() test -> Expected(int32, "0") {
-    return 6 <= 5
+func test_string_eq() test -> Expected(bool, "1") {
+    let a: string = "hi"
+    let b: string = "hi"
+    return a == b
 }

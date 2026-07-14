@@ -1,28 +1,54 @@
 package classes_test
 build test
 
-class Box {
+class Animal {
+    name: string
+}
+
+func (a: Animal) init(name: string) {
+    a.name = name
+}
+
+func (a: Animal) deinit() {
+}
+
+func test_class_construction() test -> Expected(string, "Rex") {
+    let a = Animal(name: "Rex")
+    return a.name
+}
+
+class Counter {
     value: int32
-    ready: bool
 }
 
-func (b: Box) init(val: int32) {
-    b.value = val
-    b.ready = true
+func (c: Counter) init(start: int32) {
+    c.value = start
 }
 
-func (b: Box) deinit() {
-    b.ready = false
+func test_class_init_sets_field() test -> Expected(int32, "5") {
+    let c = Counter(start: 5)
+    return c.value
 }
 
-func test_init_sets_value() test -> Expected(int32, "42") {
-    let b = Box(val: 42)
-    defer b.delete()
-    return b.value
+var deinitCount: int32 = 0
+
+class Tracked {
+    id: int32
 }
 
-func test_init_sets_bool_field() test -> Expected(int32, "1") {
-    let b = Box(val: 10)
-    defer b.delete()
-    return b.ready
+func (t: Tracked) init(id: int32) {
+    t.id = id
+}
+
+func (t: Tracked) deinit() {
+    deinitCount += 1
+}
+
+func test_deinit_runs_at_scope_exit() test -> Expected(int32, "1") {
+    deinitCount = 0
+    let makeAndDrop = func () {
+        let t = Tracked(id: 1)
+    }
+    makeAndDrop()
+    return deinitCount
 }

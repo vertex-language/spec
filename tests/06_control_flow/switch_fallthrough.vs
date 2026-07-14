@@ -1,44 +1,31 @@
 package control_flow_test
 build test
 
-func test_fallthrough_continues_to_next_case() test -> Expected(int32, "10") {
-    var x: int32 = 0
-    switch 0 {
+func test_fallthrough_runs_next_case() test -> Expected(int32, "2") {
+    let x: int32 = 0
+    var count: int32 = 0
+    switch x {
     case 0:
-        x = 5
+        count += 1
         fallthrough
     case 1:
-        x += 5    // reached via fallthrough: x becomes 10
+        count += 1
     default:
-        x = 99
+        count += 100
     }
-    return x
+    return count
 }
 
-func test_no_implicit_fallthrough() test -> Expected(int32, "5") {
-    var x: int32 = 0
-    switch 0 {
+func test_no_fallthrough_stops_after_case() test -> Expected(int32, "1") {
+    let x: int32 = 0
+    var count: int32 = 0
+    switch x {
     case 0:
-        x = 5     // stops here without fallthrough
+        count += 1
     case 1:
-        x = 10
+        count += 1
     default:
-        x = 99
+        count += 100
     }
-    return x
-}
-
-func test_fallthrough_skips_condition() test -> Expected(int32, "1") {
-    // fallthrough transfers unconditionally — case 1 runs even though x != 1
-    var hit: int32 = 0
-    switch 0 {
-    case 0:
-        hit = 0
-        fallthrough
-    case 1:
-        hit = 1
-    default:
-        hit = 99
-    }
-    return hit
+    return count
 }

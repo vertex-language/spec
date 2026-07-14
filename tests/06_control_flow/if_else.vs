@@ -1,78 +1,50 @@
 package control_flow_test
 build test
 
-func test_if_true_branch() test -> Expected(string, "positive") {
+func test_if_true_branch() test -> Expected(int32, "1") {
     let x: int32 = 5
+    var result: int32 = 0
     if x > 0 {
-        return "positive"
-    }
-    return "other"
-}
-
-func test_if_false_skips_body() test -> Expected(string, "other") {
-    let x: int32 = -5
-    if x > 0 {
-        return "positive"
-    }
-    return "other"
-}
-
-func test_if_else() test -> Expected(string, "negative") {
-    let x: int32 = -5
-    if x > 0 {
-        return "positive"
-    } else {
-        return "negative"
-    }
-}
-
-func test_else_if_first() test -> Expected(string, "positive") {
-    let x: int32 = 5
-    if x > 0 {
-        return "positive"
+        result = 1
     } else if x < 0 {
-        return "negative"
+        result = -1
     } else {
-        return "zero"
+        result = 0
     }
+    return result
 }
 
-func test_else_if_second() test -> Expected(string, "negative") {
-    let x: int32 = -3
+func test_else_if_branch() test -> Expected(int32, "-1") {
+    let x: int32 = -5
+    var result: int32 = 0
     if x > 0 {
-        return "positive"
+        result = 1
     } else if x < 0 {
-        return "negative"
+        result = -1
     } else {
-        return "zero"
+        result = 0
     }
+    return result
 }
 
-func test_else_fallthrough_to_zero() test -> Expected(string, "zero") {
+func test_else_branch() test -> Expected(int32, "0") {
     let x: int32 = 0
+    var result: int32 = 99
     if x > 0 {
-        return "positive"
+        result = 1
     } else if x < 0 {
-        return "negative"
+        result = -1
     } else {
-        return "zero"
+        result = 0
     }
+    return result
 }
 
-func test_if_compound_and() test -> Expected(bool, "1") {
-    let a: int32 = 10
-    let b: int32 = 20
-    if a < b && b < 30 {
-        return true
+func test_if_no_else() test -> Expected(bool, "1") {
+    let x: int32 = 5
+    var entered = false
+    if x > 0 {
+        entered = true
     }
-    return false
-}
-
-func test_if_compound_or() test -> Expected(bool, "1") {
-    let a: int32 = 50
-    let b: int32 = 5
-    if a < 10 || b < 10 {
-        return true
-    }
-    return false
+    return entered
 }

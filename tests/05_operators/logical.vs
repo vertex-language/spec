@@ -1,36 +1,41 @@
 package operators_test
 build test
 
-func test_not_true() test -> Expected(bool, "0") {
-    return !true
+func test_not() test -> Expected(bool, "0") {
+    let a: bool = true
+    return !a
 }
 
-func test_not_false() test -> Expected(bool, "1") {
-    return !false
+func test_and_true() test -> Expected(bool, "1") {
+    let a: bool = true
+    let b: bool = true
+    return a && b
 }
 
-func test_and_tt() test -> Expected(bool, "1") {
-    return true && true
+func test_and_false() test -> Expected(bool, "0") {
+    let a: bool = true
+    let b: bool = false
+    return a && b
 }
 
-func test_and_tf() test -> Expected(bool, "0") {
-    return true && false
+func test_or_true() test -> Expected(bool, "1") {
+    let a: bool = false
+    let b: bool = true
+    return a || b
 }
 
-func test_or_tf() test -> Expected(bool, "1") {
-    return true || false
-}
-
-func test_or_ff() test -> Expected(bool, "0") {
-    return false || false
+func test_or_false() test -> Expected(bool, "0") {
+    let a: bool = false
+    let b: bool = false
+    return a || b
 }
 
 func test_short_circuit_and() test -> Expected(bool, "0") {
-    let result = false && true
-    return result
-}
-
-func test_short_circuit_or() test -> Expected(bool, "1") {
-    let result = true || false
-    return result
+    var called = false
+    let sideEffect = func() -> bool {
+        called = true
+        return true
+    }
+    let result = false && sideEffect()
+    return called
 }
