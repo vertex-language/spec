@@ -61,7 +61,9 @@ w.rename("draft")
 
 ---
 
-## 3. Transfer — `var` / `.transfer()`
+## 3. Transfer — `var`
+
+The marker is the same word at both ends: `var` in the parameter declares the owning convention, `var` at the call site says this use transfers rather than copies.
 
 ```vertex
 func archive(w: var Widget) {
@@ -71,35 +73,35 @@ func archive(w: var Widget) {
 
 ```vertex
 var w = Widget(1)
-archive(w.transfer())
+archive(var w)
 inspect(w)          // error: use of transferred value `w`
 ```
 
 ```vertex
 var w = Widget(1)
-archive(w)             // no .transfer() — deep copy
+archive(w)             // no marker — deep copy
 inspect(w)             // ok
 ```
 
 ```vertex
 var w = Widget(1)
 
-let final = w.transfer()   // TRANSFER
-let backup = w              // COPY
+let final = var w      // TRANSFER
+let backup = w         // COPY
 ```
 
 ```vertex
 var w = Widget(1)
-var a = w.transfer()
-var b = a.transfer()
+var a = var w
+var b = var a
 
-archive(b.transfer())
+archive(var b)
 ```
 
 ```vertex
 var w = Widget(1)
 var a = w              // COPY — w survives
-var b = a.transfer()   // TRANSFER — a dead
+var b = var a          // TRANSFER — a dead
 
 inspect(w)             // ok
 inspect(a)             // error: use of transferred value `a`
@@ -107,19 +109,29 @@ inspect(a)             // error: use of transferred value `a`
 
 ```vertex
 var w = Widget(1)
-let final = w.transfer()
+let final = var w
 inspect(w)          // error: use of transferred value `w`
 ```
 
 ```vertex
-w.transfer()                    // error: transfer outside owning position
-if w.transfer() { }              // error: transfer outside owning position
-let x = (w.transfer(), 1)        // ok — tuple element is owning position
+var w                            // error: transfer outside owning position
+if var w { }                     // error: transfer outside owning position
+let x = (var w, 1)               // ok — tuple element is owning position
 ```
 
+The marker takes a binding or a field path, never a computed expression:
+
 ```vertex
-for f in frames.transfer() {
-    q.submit(f.transfer())
+let x = var self.render.buffers.staging   // ok — field path
+let y = var pick(a, b)                    // error: transfer requires a binding
+                                           //        or field path
+```
+
+The consuming loop marks the binding, not the iterable — each element moves out into `f`, and the container is dead after the loop:
+
+```vertex
+for var f in frames {
+    q.submit(var f)
 }
 
 inspect(frames)                 // error: use of transferred value `frames`
@@ -139,12 +151,12 @@ func f3(x: var T)      // owning — transfer/copy set at call site
 f1(x)                  // shared
 f2(x)                  // exclusive
 f3(x)                  // owning, COPY
-f3(x.transfer())       // owning, TRANSFER
+f3(var x)              // owning, TRANSFER
 ```
 
 ```vertex
 let a = x              // COPY
-let b = x.transfer()   // TRANSFER
+let b = var x          // TRANSFER
 ```
 
 ---
@@ -208,7 +220,7 @@ var u = unique(Widget(1))
 
 ```vertex
 var u = unique(Widget(1))
-var v = u.transfer()   // TRANSFER — O(1)
+var v = var u          // TRANSFER — O(1)
 var w = u              // COPY — deep-copies pointee
 ```
 
@@ -227,7 +239,7 @@ func take(w: unique Widget) {
 var w = Widget(1)
 
 if cond {
-    let x = w.transfer()
+    let x = var w
 }
 
 inspect(w)      // error: possibly transferred value `w`
@@ -237,7 +249,7 @@ inspect(w)      // error: possibly transferred value `w`
 var w = Widget(1)
 
 for i in 0..3 {
-    let x = w.transfer()    // error: `w` transferred inside loop body
+    let x = var w    // error: `w` transferred inside loop body
 }
 ```
 
@@ -257,7 +269,7 @@ func inspectAndArchive(w: Widget) {
 func archive(w: var Widget) { }
 
 var v = Widget(1)
-archive(v.transfer())
+archive(var v)
 inspect(v)           // error: use of transferred value `v`
 ```
 
@@ -265,11 +277,11 @@ inspect(v)           // error: use of transferred value `v`
 func both(a: var Widget, b: var Widget) { }
 
 var w = Widget(1)
-both(w.transfer(), w.transfer())   // error: `w` transferred twice in same call
+both(var w, var w)   // error: `w` transferred twice in same call
 ```
 
 ```vertex
-both(w.transfer(), w)   // error: `w` copied while being transferred in same call
+both(var w, w)   // error: `w` copied while being transferred in same call
 ```
 
 ---
@@ -314,7 +326,7 @@ func track(w: weak Widget) {
 ```
 
 ```vertex
-let s, err = w.upgrade()
+let s, err = upgrade(w)
 if err != "" {
     return
 }
@@ -327,7 +339,7 @@ var w = weak(a)
 
 drop(a)
 
-let s, err = w.upgrade()
+let s, err = upgrade(w)
 if err != "" {
     // s is zero-value
 }
@@ -337,7 +349,7 @@ if err != "" {
 inspect2(w)             // shared — bare
 retarget(w)             // exclusive — bare
 consume(w)              // owning, COPY — bare
-consume(w.transfer())   // owning, TRANSFER
+consume(var w)          // owning, TRANSFER
 ```
 
 ---
@@ -362,14 +374,14 @@ func (q: mut EncodeQueue) submit(f: var Frame) {
 var frame = cam.capture()
 applyFilter(frame)                // mut, bare
 
-q.submit(frame.transfer())        // TRANSFER — ~free
+q.submit(var frame)               // TRANSFER — ~free
 q.submit(frame)                   // COPY — 33 MB duplicated
 ```
 
 ```vertex
 inspect(frame)               // bare — free, shared read
 applyFilter(frame)           // bare — free, exclusive access
-q.submit(frame.transfer())   // marked — ~free, explicit transfer
+q.submit(var frame)          // marked — ~free, explicit transfer
 q.submit(frame)              // bare — O(data), implicit deep copy
 ```
 
@@ -393,7 +405,7 @@ func (s: shared FileSession) init() {
 }
 
 func (c: DataChunk) validate_and_process() {
-    let s, err = c.parent.upgrade()
+    let s, err = upgrade(c.parent)
     if err == "" {
         let key = s.session_key
     }
@@ -401,7 +413,7 @@ func (c: DataChunk) validate_and_process() {
 ```
 
 | | Zero-cost back-edge | `weak T` |
-| --- | --- | --- |
+|---|---|---|
 | Read cost | O(1) pointer load | O(1) + atomic check |
 | Cycle safety | Compiler-proved | Runtime |
 | Deinit access | Compile error | Error tuple from `upgrade()` |
