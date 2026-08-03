@@ -4,12 +4,25 @@
 
 ## 0. No Import
 
-`typed_ptr`, and every primitive that operates on it, is core grammar — the same tier as `sizeof`, `alignof`, `reinterpret`, and `&`. There is no package to import and no namespace prefix anywhere in this file.
+`typed_ptr` and every primitive over it are core grammar, the same tier as
+`sizeof`, `alignof`, `reinterpret`, and `&`. No package, no namespace prefix.
 
-```vertex
-// no import line — new/delete/resize/copy/zero/addr are always in scope
-var p: typed_ptr int32
-```
+`new`, `delete`, `resize`, `copy`, `zero`, and `addr` are reserved builtin names
+(grammar.md, *Reserved builtin names*). The `func` lines in this file describe
+call shapes; they are not declarations you can write, shadow, or attach to a
+receiver.
+
+`panic` is likewise reserved. It appears in the failure paths below because an
+allocation failure is often not recoverable at the call site; it takes a
+`string` and does not return.
+
+**When to reach for this document at all.** `[]T`, `map[K]V`, and `chan T` cover
+the cases where a container owns its storage discipline and can afford to abort
+on exhaustion. `typed_ptr` is what those types are built *from*: a container
+author writing a fallible `try_reserve`, an arena with a fallback pool, an
+embedded allocator that must not abort, a buffer a foreign call fills in place.
+Outside that audience, reaching for `typed_ptr` gives up every guarantee in
+`ownership.md` and buys nothing.
 
 ---
 
@@ -19,28 +32,66 @@ var p: typed_ptr int32
 var p: typed_ptr int32
 ```
 
-`typed_ptr T` is the raw, last-resort pointer — no ownership tracking, no refcount, no compiler discipline. `ownership.md` never governs it (§7/§8 of that spec are explicit on this point).
+`typed_ptr T` is the raw, last-resort pointer: one machine word holding an
+address. No ownership tracking, no refcount, no compiler discipline. Nothing in
+`ownership.md` governs it, and nothing in this file takes a `var` parameter or is
+written with the transfer marker.
 
-**Ownership status, spelled out.** A `typed_ptr T` is a thin value (foundation_spec §3.1): bare copy is a register move of the address word, `.transfer()` on it is legal but a no-op beyond ordinary liveness marking (there is no payload for the copy/transfer distinction to distinguish), and **no teardown is ever emitted** for a `typed_ptr` binding going dead — the pointee's lifetime is entirely the programmer's problem, via `delete` (§11.2). Copying a `typed_ptr` never duplicates the pointee; two copies are two aliases, unchecked. This is the one type in the language where the Law of Exclusivity (ownership §1) is a convention rather than a proof.
+* A bare copy (`let q = p`) is a register move.
+* A marked transfer (`let q = var p`) is legal and identical in cost — it marks
+  `p` dead, but there is no payload to distinguish.
+* No teardown is ever emitted when a `typed_ptr` binding goes dead. The pointee's
+  lifetime is yours, via `delete` (§11.2).
+
+Two copies are two unchecked aliases. This is the one type where the exclusivity
+rules (ownership §9) are convention rather than proof: the compiler will not
+notice that `p` and `q` reach the same block, and will not stop you passing both
+into a call that writes through one of them.
+
+`typed_ptr T` is a `TypeLit`, so it composes wherever a type is admissible — a
+field, a local, a parameter, an element type. What it may not be is the direct
+base of another `PointerType`; see §2.1.
 
 ---
 
-## 2. Address-of / Dereference — both stay `&`
+## 2. `&` — Address-of / Dereference
 
-Direction is inferred from the operand's type: `&` on an ordinary value takes its address; `&` on a `typed_ptr T` dereferences it. This is the one symbolic operation retained on `typed_ptr` beyond comparison (§5) — its contract never varies (read or write through a live, aligned, initialized `T`), so there is nothing a method name would disambiguate. Every operation that *computes a new address* instead of reading/writing through an existing one is a method, not a symbol — see §3 and §6.
+Direction comes from the operand's written type: `&` on an ordinary value takes
+its address, `&` on a `typed_ptr T` dereferences it.
 
 ```vertex
 var x: int32 = 42
 let p = &x          // address-of  — int32 -> typed_ptr int32
 let v = &p          // dereference — typed_ptr int32 -> int32
-&p = 99             // dereference on the write side — writes through p
+&p = 99             // dereference on the write side
 ```
 
-**Generic bodies.** Inside a generic declaration, `&x` where `x`'s type is a type parameter `T` is **always address-of**, at every instantiation — including `T = typed_ptr U`. The direction rule keys on the *statically written* type, and a bare type parameter is not spelled `typed_ptr`. A generic body that needs to dereference must constrain or accept `typed_ptr U` explicitly in the signature, at which point the operand's written type is a `typed_ptr` and `&` dereferences as normal. The meaning of a source line never flips per instantiation.
+The write form derives without a special rule: an `AssignTarget` is a
+`PrimaryExpr`, and `&p` is one (grammar, *Assignment*).
+
+This is the only symbolic operation on `typed_ptr` beyond comparison (§5): its
+contract never varies (read or write through a live, aligned, initialized `T`),
+so a method name would disambiguate nothing. Everything that *computes a new
+address* is a method — §3, §6.
+
+`&` binds tighter than `.`, which is the one precedence fact worth memorizing
+here:
+
+```vertex
+&p.add(1)           // parses as (&p).add(1)  — almost never what you meant
+&(p.add(1))         // dereferenced read at offset 1
+```
+
+**Generic bodies.** Where `x`'s type is a type parameter `T`, `&x` is always
+address-of, at every instantiation, including `T = typed_ptr U`. The rule keys on
+the statically written type, and a bare `T` is not spelled `typed_ptr`. A generic
+that must dereference takes `typed_ptr U` explicitly. A source line never flips
+meaning per instantiation.
 
 ### 2.1 `addr` — Address of a Pointer
 
-The `&`-by-operand-type rule leaves one thing unspellable: the address *of* a `typed_ptr` binding itself (`&p` already means dereference). The `addr` builtin fills exactly that hole, and nothing else:
+`&p` already means dereference, leaving the address *of* a `typed_ptr` binding
+unspellable. `addr` fills that hole and nothing else.
 
 ```vertex
 func addr[T](p: typed_ptr T) -> typed_ptr (typed_ptr T)
@@ -48,126 +99,182 @@ func addr[T](p: typed_ptr T) -> typed_ptr (typed_ptr T)
 
 ```vertex
 var p: typed_ptr int32 = nil
-let pp = addr(p)              // typed_ptr (typed_ptr int32) — points at the slot holding p
-&pp = someOther               // writes a new address into p, through pp
+let pp = addr(p)              // points at the slot holding p
+&pp = someOther               // writes a new address into p
 ```
 
-* `addr` requires an addressable operand — a `var` binding or a field path, same rule as passing to a `mut` parameter (foundation_spec §2.2). `addr` of a `let`, a temporary, or an expression is a compile error.
-* `addr` exists **only** for `typed_ptr` operands. On any other type, `&x` already means address-of, and `addr(x)` is a compile error with a fix-it pointing at `&`.
-* This is the honest spelling for a foreign `T**` out-param that the boundary tuple (interop §3) doesn't absorb — the residue case, matching `typed_ptr T`'s own status as the residue of interop §5.
+* Requires an addressable operand — a `var` binding or field path, the same rule
+  as a `mut` argument (ownership §2).
+* Exists only for `typed_ptr` operands; `addr(x)` on anything else is a compile
+  error with a fix-it pointing at `&`.
+* This is the honest spelling for a foreign `T**` out-param the boundary tuple
+  doesn't absorb (abstract_interfaces §2).
 
-Deeper nesting composes the obvious way (`addr(pp)` is `typed_ptr (typed_ptr (typed_ptr T))`); each `&` on the result peels one level.
+Nesting composes (`addr(pp)` is `typed_ptr (typed_ptr (typed_ptr T))`); each `&`
+peels one level. The parentheses are required — a `PointerType` may not be the
+direct base of another (grammar, *Channel and pointer types*).
 
 ---
 
 ## 3. Arithmetic — Methods, Scaled by `sizeof(T)`
 
-Computing a new address is exactly the operation whose bounds contract is easy to get wrong, so it is spelled as a named method rather than an operator — the method name is the place the reader's eye catches it, and the place a doc comment or tooltip can carry the contract from §3.1. There is no operator form; `+`, `-`, `+=`, `++`, `--` do not exist on `typed_ptr T`.
+Computing an address is the operation whose bounds contract is easiest to get
+wrong, so it is a named method: the name is where the reader's eye catches it and
+where a doc comment can carry §3.1. There is no operator form — `+`, `-`, `+=` do
+not exist on `typed_ptr T`, and there is no `++`/`--` anywhere in the language.
+
+```vertex
+func (p: typed_ptr T) add(n: int64) -> typed_ptr T
+func (p: typed_ptr T) sub(n: int64) -> typed_ptr T
+```
 
 ```vertex
 let p2 = p.add(1)
 let p3 = p.sub(4)
 p = p.add(1)
-p = p.sub(1)
 ```
 
-There is no increment/decrement method — `p++` / `p--` are gone entirely, not renamed; write `p = p.add(1)` instead.
+The count is in elements, not bytes: `p.add(1)` moves `sizeof(T)` bytes. This is
+the entire reason the pointer carries a `T` at all.
 
 ### 3.1 Bounds Are Computed, Not Checked
 
-`.add`/`.sub` compute an address; they do not check one. `p.add(n)` is legal to *evaluate* even when the result lands outside the block `p` points into — exactly one exception: the address one element past the last valid one is a legal value to *hold* (needed for end-of-range loops), but not to dereference. Forming any address further out, or dereferencing (`&`, `.at`/`.setAt`, `copy`/`zero` past the block's extent) an out-of-bounds pointer, is undefined — the same undefined-not-a-compile-error status as a stale `delete` (§14). The compiler proves nothing about `typed_ptr` bounds; that is the entire tradeoff of reaching for `typed_ptr` over `[]T` (interop §5).
+`.add`/`.sub` compute an address; they do not check one. The address one element
+past the last valid one is legal to *hold* (end-of-range loops), not to
+dereference. Anything further out, or any dereference of an out-of-bounds
+pointer, is undefined (§14.2). The compiler proves nothing about `typed_ptr`
+bounds — that is the tradeoff of reaching for it over `[]T`, whose subscript is
+bounds-checked and panics (foundation §22.4).
 
 ---
 
 ## 4. Pointer − Pointer
 
 ```vertex
+func (p: typed_ptr T) diff(q: typed_ptr T) -> int64
+```
+
+```vertex
 let n: int64 = p2.diff(p)
 ```
 
-`p2.diff(p)` yields the element count (not byte count) from `p` to `p2`, signed.
+Yields the signed element count (not bytes) from `p` to `p2`. Defined only when
+both pointers address the same allocated block — from one `new`/`resize`, one
+`&x`, or one array's backing storage — with either permitted to sit
+one-past-the-end. Unrelated blocks are undefined (§14.2).
 
-**Same-block contract.** `.diff` is defined only when both pointers address the same allocated block (from one `new`/`resize`, one `&x`, or one array's backing storage), including either one sitting at the block's one-past-the-end address (§3.1). Subtracting pointers into unrelated blocks is undefined — same status as out-of-bounds arithmetic, deliberately matching the machine model this lowers to (foundation_spec §1). Like §3.1, nothing checks this; the method name is where the contract hangs, not where it's enforced.
+There is no subtraction operator form, for §3's reason.
 
 ---
 
 ## 5. Comparison — Stays Symbolic
 
-Comparing addresses never dereferences, so there is no unsafety to flag — comparison keeps ordinary operators, unlike §3 and §6.
+Comparing addresses never dereferences, so there is nothing to flag.
 
 ```vertex
-p == p2
-p != p2
-p <  p2
-p <= p2
-p >  p2
-p >= p2
+p == p2    p != p2    p < p2    p <= p2    p > p2    p >= p2
 ```
 
-Equality (`==`, `!=`) is defined for any two `typed_ptr T` of the same `T`, including against `nil` (§13). **Ordering** (`<`, `<=`, `>`, `>=`) carries the same same-block contract as `.diff` (§4): ordering pointers into unrelated blocks is undefined, and ordering against `nil` is a compile error — `nil` participates in equality only.
+Equality is defined for any two `typed_ptr T` of the same `T`, including against
+`nil` (§13). Ordering carries §4's same-block contract, and ordering against
+`nil` is a compile error — `nil` participates in equality only.
+
+`===` and `!==` are identity operators on classes (foundation §14) and do not
+apply to a `typed_ptr`; `==` already compares addresses.
 
 ---
 
 ## 6. Indexing — Methods, Not Sugar
 
-Indexing is arithmetic-plus-dereference, so it follows §3, not §2: it is a method pair, not bracket sugar.
+Indexing is arithmetic plus dereference, so it follows §3, not §2.
 
 ```vertex
-let x = p.at(3)      // read  — equivalent to &(p.add(3))
+func (p: typed_ptr T) at(n: int64) -> T
+func (p: typed_ptr T) setAt(n: int64, value: T)
+```
+
+```vertex
+let x = p.at(3)       // read  — equivalent to &(p.add(3))
 p.setAt(3, 9)         // write — equivalent to &(p.add(3)) = 9
 ```
+
+`p[3]` is not a form. Bracket subscripting belongs to `[]T`, `[N]T`, and
+`map[K]V`, all of which are checked; giving the unchecked type the checked type's
+spelling is exactly the confusion this design avoids.
 
 ---
 
 ## 7. Casting — `as`
 
 ```vertex
-let raw:  typed_ptr uint8 = p as typed_ptr uint8   // reinterpret
-let addr: uint64           = p as uint64            // pointer -> integer
+let raw:  typed_ptr uint8  = p as typed_ptr uint8    // reinterpret
+let addr: uint64           = p as uint64             // pointer -> integer
 let back: typed_ptr int32  = addr as typed_ptr int32 // integer -> pointer
 let auto: typed_ptr uint8  = p                       // target known — `as` inferred
 ```
 
-`as` never touches memory — it is a static reinterpretation of the address's type, not a read or write — so it stays symbolic like comparison (§5), regardless of how unrelated `T` and `U` are: `typed_ptr T as typed_ptr U` is always legal for any `T`, `U`, the same way `p as typed_ptr uint8` above is.
+`as` is a static reinterpretation of the address's type, never a read or write, so
+it stays symbolic like §5. `typed_ptr T as typed_ptr U` is legal for any `T`, `U`
+— the compiler is not checking that the bytes at that address mean a `U`.
+
+**The last line is a scoped exception, not a general one.** Foundation §6 admits
+no implicit numeric conversions: every width or signedness change is written. The
+inferred form here is available only where both sides are pointer types and the
+target is fixed by an annotation, an argument, or a return position. A pointer
+carries no width and no signedness, so there is no information to lose and
+nothing for the reader to reconstruct. `p as uint64` and `addr as typed_ptr int32`
+cross between a pointer and an integer and are never inferred.
 
 ---
 
 ## 8. Casting a Foreign Handle — `abstract` → `typed_ptr T`
 
-An `abstract` handle (interop §2) is a distinct type from `typed_ptr T` — no arithmetic, no dereference, no stride. A cast between the two is legal only in one direction, and only under one condition.
+An `abstract` handle (abstract_interfaces §1) is a distinct type: no arithmetic,
+no dereference, no stride. The cast is legal in one direction only, decided by the
+declaring block's ABI linkage (abstract_interfaces §0):
 
-**Legal — memory-flat classification only.** The library's ABI classification (interop §1) decides this: C and WASM imports are memory-flat, meaning the handle is already an address into linear memory. Casting it to `typed_ptr T` is an ordinary reinterpretation, same as any other `as`:
-
-```vertex
-// sdlWindowHandle: SDL_Window, minted by a memory-flat (C) import
-let raw: typed_ptr uint8 = sdlWindowHandle as typed_ptr uint8
-```
-
-**Illegal — object-graph classification.** Objective-C and JS imports are object-graph: the handle is a runtime object reference with no byte representation for Vertex to point at.
+| Linkage | Handle is | `as typed_ptr T` |
+| --- | --- | --- |
+| C / C++ / COM (`linux`, `windows`, `darwin`), `wasm` | an address into linear memory | legal — ordinary reinterpretation |
+| Objective-C (`declare framework` on `darwin`), JS (`build js`) | a runtime object reference | error — no byte representation |
 
 ```vertex
-// nsViewHandle: NSView, minted by an object-graph (Objective-C) import
-let raw = nsViewHandle as typed_ptr uint8
-// error: `NSView` is an object-graph handle (Objective-C) —
-//        no byte representation to reinterpret
+let raw: typed_ptr uint8 = sdlWindowHandle as typed_ptr uint8   // memory-flat: ok
+let bad: typed_ptr uint8 = nsViewHandle as typed_ptr uint8      // object-graph: error
 ```
 
-**No return path.** There is no cast from `typed_ptr T` back to `abstract`. Minting an `abstract` handle is the foreign library's job — a constructor or factory call at the boundary (interop §4.2–§4.3) — never a client-side reinterpretation of an arbitrary pointer.
-
-**Nominal typing still applies.** Each `abstract` alias is distinct (interop §2); a cast off of one memory-flat handle says nothing about another. `SDL_Window as typed_ptr uint8` being legal doesn't make some unrelated memory-flat `abstract` type interchangeable with it — the cast targets `typed_ptr T`, not another `abstract` type.
+There is no return path. Minting an `abstract` handle is the foreign library's job
+(abstract_interfaces §3.2–§3.3), never a client-side reinterpretation. Each
+`abstract` alias stays nominally distinct — one memory-flat handle casting cleanly
+says nothing about another.
 
 ---
 
-## 9. `reinterpret()` — when the target can't be inferred
+## 9. `reinterpret()` — When the Target Can't Be Inferred
+
+`reinterpret(T, p)` is `p as typed_ptr T` written where §7's inferred form has
+nothing to infer from — an argument to an untyped position, an element of a
+literal, a subexpression. It is one of the three call forms that take a `Type` in
+argument position (grammar, *Type-operator and constructor calls*).
 
 ```vertex
 let bytes = reinterpret(uint8, p)
 let back  = reinterpret(Widget, bytes)
 ```
 
+The two spellings mean the same thing and neither reads or writes memory. Prefer
+`as` where the target type is already written down; `reinterpret` exists so that
+the alternative to it is not an intermediate binding introduced solely to hang an
+annotation on.
+
 ---
 
 ## 10. `sizeof` / `alignof`
+
+```vertex
+sizeof(Type)  -> uint64
+alignof(Type) -> uint64
+```
 
 ```vertex
 let s  = sizeof(int32)     // 4
@@ -175,24 +282,45 @@ let a  = alignof(int32)    // 4
 let s2 = sizeof(Widget)
 ```
 
+Both take a `Type`, not an expression — `sizeof(x)` on a binding is an error.
+Both yield `uint64`, which is the width `new`, `resize`, `copy`, and `zero` all
+take, so a size computation composes with an allocation without a cast:
+
+```vertex
+let buf, err = new[uint8](sizeof(Header) * 4)
+```
+
+`sizeof(T)` on a class is the size of the object, and a class is byte-for-byte
+identical in layout to a struct (foundation §27).
+
 ---
 
 ## 11. Allocation — `new` / `delete` / `resize`
 
-Three bare, generic builtins handle allocation. Each is an ordinary fallible call under the boundary-tuple convention (foundation §35) where it returns one — nothing here is a `var` parameter, nothing accepts `.transfer()`, and the compiler enforces none of the discipline described below. It is manual, exactly like the pointer arithmetic in §3.
+`new` and `resize` are fallible calls under the boundary-tuple convention
+(foundation §35).
+
+> **Why these report and `[]T` doesn't.** `[]T` and `chan T` panic on exhaustion
+> (channels.md §1) because they own their storage discipline. `new` is the
+> primitive those types are built *from* — a container author writing a fallible
+> `try_reserve`, an arena with a fallback pool, or an embedded allocator that must
+> not abort needs the failure as a value. That audience is the entire reason
+> `typed_ptr` exists.
 
 ### 11.1 `new[T]` — Allocate
 
 ```vertex
 func new[T](count: uint64) -> (typed_ptr T, string)
 func new[T](count: uint64, align: uint64) -> (typed_ptr T, string)
-func new[T](count: uint64, zero: bool) -> (typed_ptr T, string)
-func new[T](count: uint64, align: uint64, zero: bool) -> (typed_ptr T, string)
+func new[T](count: uint64, zeroed: bool) -> (typed_ptr T, string)
+func new[T](count: uint64, align: uint64, zeroed: bool) -> (typed_ptr T, string)
 ```
 
-Allocates space for `count` contiguous values of `T` (`count * sizeof(T)` bytes).
+Allocates `count * sizeof(T)` bytes. On success the string is `""`; on failure the
+pointer is `nil` (§13) and the string carries a message such as `"out of memory"`.
 
-**Zeroed by default.** A block from `new` starts as `count * sizeof(T)` zero bytes unless you ask otherwise. `zero: false` opts out and hands back memory whose contents are unspecified.
+**Zeroed by default.** `zeroed: false` opts out and returns memory whose contents
+are unspecified.
 
 ```vertex
 let buf, err = new[uint8](1024)              // zeroed — the default
@@ -204,47 +332,56 @@ defer delete(buf)
 buf.setAt(0, 0xFF)
 ```
 
-This is the one place in `typed_ptr`'s surface where the language declines to be maximally raw, and it is a deliberate exception to the cost-transparency rule (ownership §10.3 — cheap is silent, expensive is visible). The reasoning is the one that rule itself gives: **when both mistakes are silent, the default goes to the safe one.** Forgetting `zero: false` costs a memset the optimizer can often see through. Forgetting `zero: true` — under the old polarity — cost a garbage read, and garbage reads out of a fresh allocation are how the previous tenant's bytes escape. Ownership §10.3 already accepted a silent O(data) deep copy on a bare call site for exactly this reason ("nothing you don't write can kill your binding"); a silent memset on a *fresh, unread* block is a far smaller price than the one that rule already agreed to pay.
+This is a deliberate exception to ownership §11's cost-transparency rule, on that
+rule's own reasoning: when both mistakes are silent, the default goes to the safe
+one. Forgetting `zeroed: false` costs a memset the optimizer can often elide, and
+which the OS has already paid for any allocation large enough to come from fresh
+pages. Forgetting `zeroed: true` under the old polarity cost a garbage read —
+which is how the previous tenant's bytes escape.
 
-The cost is also smaller than it reads. For any allocation large enough to come from fresh pages, the operating system has already zeroed them — it must, for the same disclosure reason — so the memset collapses to nothing. It is real only for small blocks recycled off a free list, which are a few cache lines you are about to touch anyway.
-
-**`zero: false` — the opt-out.** Reach for it when every byte is provably overwritten before it is read: a container's growth path, a buffer handed straight to a foreign call that fills it, a scratch block reused under a length discipline.
-
-```vertex
-// Vector.grow — push() only ever writes below `length`, so nothing
-// in the fresh tail is readable before it is written.
-let raw, err = new[T](newCapacity, zero: false)
-if err != "" { panic("OOM: " + err) }
-```
-
-`zero: false` is a claim, not a hint: reading a byte of an unzeroed block before writing it is undefined, the §3.1 rule applied to initialization rather than to bounds. Nothing checks it.
-
-**`align`** guarantees the block starts on an `align`-byte boundary instead of whatever `alignof(T)` would naturally give it. `align` must be a power of two; violating that is an allocation failure (`nil`, non-empty string), not a distinct diagnostic.
+**`zeroed: false`** is for blocks provably written before read: a container's
+growth path, a buffer a foreign call fills, scratch under a length discipline. It
+is a claim, not a hint — reading before writing is undefined (§14.2), and nothing
+checks it.
 
 ```vertex
-let simdBuf, err = new[float32](16, align: 32)   // 32-byte aligned, zeroed
-if err != "" { panic("aligned alloc failed: " + err) }
-defer delete(simdBuf)
+// Vector.grow — push() only writes below `length`, so the fresh tail
+// is never readable before it is written.
+let raw, err = new[T](newCapacity, zeroed: false)
 ```
 
-`align` and `zero` combine — an aligned block that skips the memset is one call:
+**`align`** guarantees the block starts on an `align`-byte boundary rather than
+`alignof(T)`. It must be a power of two: a literal that isn't is a compile error, a
+computed one that isn't panics. This is a bug in the source, not a state of the
+machine, so it does not take the failure channel.
 
 ```vertex
-let simdScratch, err = new[float32](16, align: 32, zero: false)
-if err != "" { panic("aligned alloc failed: " + err) }
-defer delete(simdScratch)
+let simdBuf, err = new[float32](16, align: 32, zeroed: false)
 ```
 
-**Overflow.** A `count` whose byte size (`count * sizeof(T)`) would overflow `uint64` is an allocation failure (`nil`, non-empty string) — the same failure channel as exhaustion, not undefined behavior, because `new` is the one place the size is computed under the language's control rather than the programmer's (contrast §12).
+**Overflow.** A `count` whose byte size overflows `uint64` *is* an allocation
+failure (`nil`, non-empty string) — `count` is routinely caller data read off a
+wire or a file header, exactly the thing a container author must reject rather
+than die on.
 
-**Inference.** `T` may be written explicitly (`new[uint8](...)`) or inferred from the declared type of the binding it flows into, following the same inference precedent as `as` (§7):
+**Inference.** `T` may be explicit or inferred from the binding it flows into:
 
 ```vertex
 var buf: typed_ptr uint8
-buf, err = new(1024)   // T inferred as uint8 from `buf`'s declared type
+var err: string
+buf, err = new(1024)   // T inferred as uint8
 ```
 
-On success the string is `""`. On failure the pointer is `nil` (§13) and the string carries a message such as `"out of memory"`.
+This is a **stated exception to generics §5.3**, which says a type parameter
+appearing only in the return type cannot be inferred and must be supplied. `T`
+appears nowhere in `new`'s value parameters, so the general rule would reject the
+line above. The exception is scoped to `new` and `resize`, and only where the
+destination's pointer type is already written down — the same shape, and the same
+reasoning, as §7's inferred pointer cast. Every other generic call obeys
+generics §5.3 unchanged.
+
+> **Why `zeroed:` and not `zero:`.** `zero` is a reserved builtin name (§12.2),
+> and a reserved name may not be a parameter label.
 
 ### 11.2 `delete` — Release
 
@@ -252,164 +389,186 @@ On success the string is `""`. On failure the pointer is `nil` (§13) and the st
 func delete[T](p: typed_ptr T)
 ```
 
-Releases a block previously returned by `new` or a successful `resize`. `T` is inferred from `p`. `delete(nil)` is a no-op. Deleting anything else — a pointer derived from `&x` (§2), a pointer already deleted, or one offset from its original address (§3) — is undefined, the same way it is in the machine model this language lowers to (foundation_spec.md §1).
+Releases a block from `new` or a successful `resize`; `T` is inferred from `p`
+under the ordinary rule (generics §5.2), since it appears in a value parameter.
+`delete(nil)` is a no-op. Deleting anything else is undefined (§14.2).
 
 ```vertex
 delete(buf)
 ```
 
+`delete` does not take the transfer marker and does not kill the binding: `p`
+still holds its old address afterward, and nothing stops you dereferencing it.
+Pair every allocation with a `defer delete(...)` at the point of allocation where
+the block's lifetime is the scope's, and accept that anything else is a manual
+argument you are making.
+
 ### 11.3 `resize[T]` — Resize
 
 ```vertex
 func resize[T](p: typed_ptr T, count: uint64) -> (typed_ptr T, string)
-func resize[T](p: typed_ptr T, count: uint64, zero: bool) -> (typed_ptr T, string)
+func resize[T](p: typed_ptr T, count: uint64, zeroed: bool) -> (typed_ptr T, string)
 ```
 
-Resizes a block previously obtained from `new` to hold `count` values of `T`, preserving the lesser of the old and new sizes' worth of existing contents.
+Resizes a block from `new`, preserving the lesser of the old and new sizes'
+contents. A grown tail follows §11.1's polarity: zeroed unless `zeroed: false`,
+same claim, same lack of checking. The preserved region is untouched either way.
+§11.1's overflow rule applies identically — note `resize` has no `align`
+parameter, so a resized block is **not** guaranteed to keep an alignment the
+original was allocated with.
 
-**The tail follows `new`'s default.** When the block grows, the newly added region beyond the preserved contents is zeroed unless `zero: false` is passed — same polarity as §11.1, same reasoning, and `zero: false` is the same claim (nothing in the tail is read before it is written). The preserved region is untouched either way; `zero` never re-zeroes contents `resize` just carried over.
-
-The overflow rule from §11.1 applies to `count * sizeof(T)` here identically.
-
-* **On success:** the returned pointer is valid and `p` must not be used again — treat this exactly like a transfer, even though it isn't compiler-enforced (ownership's `.transfer()` discipline doesn't reach `typed_ptr T`, so nothing catches a stale use). If the original block was obtained with an `align` argument (§11.1), the resized block is **not** guaranteed to preserve that alignment — `resize` carries no `align` parameter of its own, so a resized SIMD-style buffer must be re-checked (or re-allocated with `new[T](count, align: ...)` and copied) rather than assumed to still satisfy the original alignment.
-* **On failure:** `p` is untouched and still valid; the returned pointer is `nil` and the string is non-empty. This is the one place a failure path leaves the *input* pointer alive rather than zeroed — the boundary-tuple's zero-value rule (foundation §35.5) applies to the *return*, not to `p`.
+* **Success:** the returned pointer is valid and `p` must not be used again. Read
+  that as a transfer of the block, but only as a reading — `resize` takes a shared
+  `typed_ptr`, the `var` marker plays no part, and nothing catches a stale use of
+  `p`.
+* **Failure:** `p` is untouched and still valid; the return is `nil` plus a
+  message. This is the one place a failure path leaves the *input* alive —
+  foundation §35.5's zero-value rule applies to the return, not to `p`.
 
 ```vertex
-var buf, err = new[uint8](64)
-if err != "" { panic("alloc failed: " + err) }
-
 let grown, err2 = resize(buf, 256)
 if err2 != "" {
-    // buf is still valid and still 64 bytes — free the old block, bail
-    delete(buf)
+    delete(buf)                  // still valid, still 64 bytes
     panic("resize failed: " + err2)
 }
-buf = grown   // buf now refers to the resized block; bytes 64..256 are zeroed
+buf = grown
 ```
+
+The reassignment on the last line is the whole discipline: one live name per
+block. Keeping `buf` and `grown` both in scope is how a stale pointer survives
+long enough to be dereferenced.
 
 ---
 
 ## 12. `copy` / `zero`
 
-### 12.1 `copy` — Overlap-Safe, Always
+Neither allocates, frees, or fails. Bounds are the caller's promise; a size that
+overflows or runs past either block's extent is undefined (§14.2).
+
+Both operate on `typed_ptr T` only. Moving between a `[]T` and a block is done by
+element or through the slice's own operations — these two primitives have no slice
+form (see §15).
+
+### 12.1 `copy`
 
 ```vertex
 func copy[T](dst: typed_ptr T, src: typed_ptr T, n: uint64)
 ```
 
-Copies `n` values of `T` from `src` to `dst`. Always overlap-safe (memmove semantics) — there is deliberately no separate overlap-unsafe variant. A split between an overlap-unsafe copy and an overlap-safe move would be a footgun, not a feature, so it collapses to one word here.
+Copies `n` values of `T`, always overlap-safe (memmove semantics). There is
+deliberately no overlap-unsafe variant — that split is a footgun, not a feature.
+
+Both pointers are the same `T`. Copying between differently typed blocks means
+saying so, with a cast at the call:
 
 ```vertex
-copy(dst, src, 1024)
+copy(dst, src as typed_ptr uint8, n)
 ```
 
-### 12.2 `zero` — Zero Existing Memory
+### 12.2 `zero`
 
 ```vertex
 func zero[T](p: typed_ptr T, count: uint64)
 ```
 
-Writes `count * sizeof(T)` zero bytes starting at `p`. Does not allocate or free; `p` must already point at a live block at least that large (from `new`, `&x`, or an array's backing storage). Cannot fail — there is no boundary tuple here, matching `copy` rather than `new`/`resize`.
-
-This is distinct from `new`'s zeroing (§11.1), which is about the state a *fresh* allocation starts in. `zero` re-clears memory that is **already alive and has been written** — a reused scratch block between passes, a stack buffer, a region being scrubbed after it held a secret. Calling `zero` on a block that just came out of `new` with the default is redundant, and a lint may flag it.
+Writes `count * sizeof(T)` zero bytes; `p` must already point at a live block that
+large. Distinct from `new`'s zeroing (§11.1), which is about the state a *fresh*
+block starts in — `zero` re-clears memory already alive and written: a reused
+scratch block, a stack buffer, a region scrubbed after holding a secret. Calling
+it on a default `new` block is redundant and a lint may flag it.
 
 ```vertex
-let buf, err = new[uint8](1024)   // already zeroed
-if err != "" { panic("alloc failed: " + err) }
-defer delete(buf)
-
 fill(buf, 1024)
-zero(buf, 1024)   // meaningful here — the block has been written since
+zero(buf, 1024)   // meaningful — the block has been written since
 ```
-
-**No overflow channel.** Unlike `new`/`resize` (§11.1), `copy` and `zero` return nothing, so there is no failure path for an overflowing or block-exceeding `n`/`count` to take: a size whose byte extent overflows `uint64`, or that runs past either block's extent, is undefined — the §3.1 rule, applied to bulk operations. The bounds are the caller's promise, same as every other operation in this file.
 
 ---
 
 ## 13. Null
 
-`typed_ptr T` is the one type that accepts `nil` — the sole exception to foundation.md §35's "no general nil."
+`typed_ptr T` is the one type accepting `nil` — the sole exception to
+foundation §35's "no general nil," and the zero value `new`/`resize` return on
+failure. It is also the zero value of a `typed_ptr` type parameter in a generic
+body (generics §6).
 
 ```vertex
 var p: typed_ptr int32 = nil
 if p == nil { }
 ```
 
-`nil` participates in **equality only**: `p == nil` and `p != nil` are the entire surface. Ordering against `nil` (`p < nil`), arithmetic from `nil` (`nil.add(1)` — there is no receiver), and dereferencing `nil` are, respectively, a compile error, a compile error, and undefined behavior. `addr(p)` on a binding *holding* `nil` is fine — it addresses the slot, not the pointee.
+`nil` participates in **equality only**. Ordering against it is a compile error,
+`nil.add(1)` is a compile error (no receiver), and dereferencing it is undefined.
+`addr(p)` on a binding holding `nil` is fine — it addresses the slot, not the
+pointee.
 
-This is also the zero value `new` and `resize` (§11) hand back on their failure path, matching the boundary-tuple convention's zero-value rule (foundation §35.5) applied to a pointer type.
-
-**Not the same exception as `abstract`.** An `abstract` handle (interop §2) also has a zeroed representation, but that is a *different* mechanism: the zero value is legal only as an error-path value paired with a non-empty error string (the boundary tuple, interop §3), never a value compared against `nil`. `abstract` has no comparable `nil` state — absence is always the tuple, never a pointer-style null check. Don't treat the two zero-representations as interchangeable just because both types are "handle-shaped."
+**Not the same exception as `abstract`.** An `abstract` handle also has a zeroed
+representation, but it is legal only as an error-path value paired with a
+non-empty string (abstract_interfaces §2) and is never compared against `nil`.
+Don't treat the two as interchangeable because both types are handle-shaped.
 
 ---
 
-## 14. Illegal Forms
+## 14. Appendix: Rejected and Undefined Forms
+
+### 14.1 Syntax errors
+
+These do not parse, or parse into a form the grammar has no reading for:
 
 ```vertex
-&p.add(1)  // error: `.add` already computes the offset; `&` here would be
-           //        dereferencing the result, not offsetting `&p` — write
-           //        `&(p.add(1))` if a dereferenced read is what's meant
+func (p: typed_ptr int32) info() { }
+               // a `ReceiverType` is a `TypeName`; a `PointerType` may not
+               // be a receiver at all. There are no methods on typed_ptr T
+               // beyond §3, §4, and §6.
 
-p.add(p2)  // error: `.add` takes a count (uint64), not another typed_ptr —
-           //        pointer + pointer is undefined; only pointer.diff(pointer)
-           //        exists (§4)
+var pp: typed_ptr typed_ptr int32
+               // a PointerType may not be the direct base of another —
+               // write typed_ptr (typed_ptr int32) (§2.1)
+```
 
-&x = 1     // error: `x` is not a typed_ptr — nothing to dereference-write
+### 14.2 Compile errors
 
-addr(x)    // error: `x` is not a typed_ptr — `&x` is already its address (§2.1)
+These parse and are rejected:
 
-addr(p.add(1))
-           // error: `addr` requires an addressable binding or field path,
-           //        not a computed temporary (§2.1)
-
-p < nil    // error: `nil` participates in equality only (§13)
-
-let d = p2.diff(q)
-           // undefined — `p2` and `q` address unrelated blocks; `.diff`
-           //             carries the same-block contract (§4). Not caught.
+```vertex
+&p.add(1)      // `&` binds tighter than `.` — this is (&p).add(1).
+               // Write &(p.add(1)) for a dereferenced read.
+p.add(p2)      // `.add` takes a count; only p.diff(p) exists (§4)
+p + 1          // no operator arithmetic on typed_ptr (§3)
+&x = 1         // `x` is not a typed_ptr — nothing to dereference-write
+addr(x)        // `x` is not a typed_ptr — `&x` is already its address (§2.1)
+addr(p.add(1)) // `addr` needs an addressable binding or field path (§2.1)
+p < nil        // `nil` participates in equality only (§13)
+sizeof(x)      // `sizeof` takes a Type, not an expression (§10)
 
 nsViewHandle as typed_ptr uint8
-           // error: `NSView` is an object-graph handle (Objective-C) —
-           //        abstract -> typed_ptr T requires a memory-flat
-           //        classification (§8)
-
+               // object-graph handle — no byte representation (§8)
 let h: WebSocket = raw as WebSocket
-           // error: no typed_ptr T -> abstract cast exists —
-           //        abstract handles are minted only at the
-           //        foreign boundary (interop §4.2–§4.3)
+               // no typed_ptr -> abstract cast exists (§8)
+new[float32](16, align: 3)
+               // literal `align` is not a power of two (§11.1)
+
+func (w: var Widget) new() { }    // reserved builtin name
+func (w: Widget) addr() { }       // reserved builtin name
+```
+
+### 14.3 Undefined behavior — none of this is caught
+
+| Form | Rule |
+| --- | --- |
+| Forming an address more than one past a block's end | §3.1 |
+| Dereferencing out of bounds (`&`, `.at`, `.setAt`, `copy`, `zero`) | §3.1 |
+| `.diff` or ordering across unrelated blocks | §4, §5 |
+| Reading an unzeroed block before writing it | §11.1 |
+| `delete` of `&x`, of an already-deleted pointer, or of an offset pointer | §11.2 |
+| Using `p` after a successful `resize` | §11.3 |
+| `copy`/`zero` past either block's extent | §12 |
+| Dereferencing `nil` | §13 |
+
+```vertex
+let buf, err = new[uint8](16)
+&buf.add(20)       // 20 past a 16-element block. buf.add(16) is legal to
+                   // hold, just not to dereference.
 
 let p = &x
-delete(p)
-           // undefined — `p` was never returned by new/resize;
-           //             deleting a stack address is not a
-           //             compile error, it is undefined behavior (§11.2)
-
-let buf, err = new[uint8](16)
-let p2 = buf.add(20)
-&p2
-           // undefined — 20 elements past a 16-element block; not caught,
-           //             matches C pointer-arithmetic UB (§3.1). One-past-
-           //             the-end (buf.add(16)) is legal to hold, just not
-           //             to dereference.
-
-let raw, err = new[uint8](16, zero: false)
-let first = raw.at(0)
-           // undefined — reading an unzeroed block before writing it.
-           //             `zero: false` is a claim that every byte is
-           //             written before it is read (§11.1); nothing
-           //             checks the claim.
-
-new[float32](16, align: 3)
-           // undefined — `align` (3) is not a power of two (§11.1);
-           //             treated as an allocation failure, not a
-           //             separate diagnostic
-
-func (w: var Widget) new() { }
-           // error: `new` is a reserved builtin name, not a
-           //        declarable member — same footing as `.transfer()`
-           //        being reserved in ownership.md §6.8
-
-func (p: typed_ptr int32) addr() { }
-           // error: `addr` is a reserved builtin name (§2.1) —
-           //        same footing as `new` above
+delete(p)          // never came from new/resize
 ```

@@ -4,75 +4,130 @@
 
 ## 0. Overview
 
-`async` and `await` form Vertex's native approach to non-blocking I/O. This cooperative model multiplexes OS-level I/O waits (e.g., epoll, kqueue, io_uring) efficiently onto a runtime reactor.
+`async` and `await` are Vertex's native approach to non-blocking I/O. The model is
+cooperative: many tasks share one OS thread, and a task that cannot proceed hands
+control back to a reactor that multiplexes kernel-level I/O waits (`epoll`,
+`kqueue`, `io_uring`).
 
 It is distinct from the `thread` concurrency model:
 
-* **`async` / `await**`: For I/O-bound tasks where the system cooperatively waits.
-* **`thread`**: For CPU-bound tasks requiring real OS-level, shared-memory parallelism.
+* **`async` / `await`** — for I/O-bound work, where the system cooperatively waits.
+* **`thread`** — for CPU-bound work needing real OS-level, shared-memory
+  parallelism.
+
+The two are not alternatives to choose between once. They compose through `chan T`,
+which both sigils produce (`channels.md` §0), and a well-shaped program usually runs
+both: threads for the crunching, tasks for the waiting.
 
 ---
 
 ## 1. The `async` Marker (Signatures)
 
-Functions containing a real OS-level poll point (where the kernel might yield "not yet") must be marked with `async`.
+A function containing a real OS-level poll point — somewhere the kernel might answer
+"not yet" — must be marked `async`.
 
 ```vertex
-func (c: Conn) read(buf: mut []uint8) async -> (int32, string) {
+func (c: TcpConn) read(buf: mut []byte) async -> (int32, string) {
     // ...
 }
-
 ```
 
-By marking a function `async`, you inform the compiler that this function returns a state machine (conceptually similar to a Promise or Future) rather than blocking the thread outright.
+The marker sits after the parameter list and before the result (grammar, *Function
+types and signatures*). It tells the compiler this function compiles to a state
+machine rather than a body that blocks its thread outright.
+
+A signature carries **at most one** marker: there is no `async gpu` function, and
+`test` cannot combine with `async` either. The marker is part of the function's
+*type* (foundation §31), so it is checked at the declaration and again at every call
+site, and a `var f: func(mut []byte) async -> (int32, string)` carries it too.
+
+Because `MethodRequirement` takes a full `Signature`, a constraint can require a
+marked method:
+
+```vertex
+constraint Reader {
+    func read(buf: mut []byte) async -> (int32, string)
+}
+```
 
 ---
 
 ## 2. The `await` Keyword (Yielding)
 
-To retrieve the value from an `async` function and cooperatively pause the current execution until that value is ready, you must use the `await` keyword.
+To retrieve the value from an `async` function and cooperatively pause until it is
+ready, use `await`:
 
 ```vertex
 let n, err = await conn.read(buf)
-
 ```
+
+`await` is a unary operator over a `UnaryExpr`, so it binds to the call and the
+tuple destructure happens outside it — the line above awaits `conn.read(buf)` and
+then unbuilds the result.
 
 ### 2.1 Explicit Suspension
 
-`await` acts as an explicit yield point. When the compiler sees `await`, it knows to pause the current function, save its state, and return control to the event loop until the network or disk is ready.
+`await` is an explicit yield point. Where the compiler sees it, it pauses the
+current function, saves the state that is live across the suspension, and returns
+control to the event loop until the network or disk is ready.
+
+The inverse matters as much: a line with no `await` on it does not suspend. There is
+no hidden yield anywhere in an `async` body, which is what makes §4's blocking
+warning a rule a reader can actually check.
 
 ### 2.2 Function Coloring
 
-Because `await` requires a state machine to pause execution, you can generally only use `await` inside another `async` function. (The `main` function is the singular exception, acting as the root reactor entry point).
+`await` requires a state machine to pause, so it is legal only inside another
+`async` function. `main` is the singular exception, acting as the root reactor entry
+point.
+
+`await` parses unconditionally wherever a unary expression is admissible; whether
+the enclosing body licenses it is a static rule, which is why the diagnostic can
+name the enclosing function rather than reporting a syntax error.
 
 ---
 
 ## 3. Spawning Concurrent Background Tasks
 
-To fire off an `async` function concurrently without waiting for it to finish, use `async` as a call-site prefix (identical to how the `go` keyword works in Golang).
-
-This tosses the state machine onto the reactor loop and immediately returns a receive-only channel (`chan T`).
+To fire off an `async` function concurrently without waiting for it, use `async` as
+a **call-site prefix** (much as `go` works in Golang). This hands the state machine
+to the reactor and immediately evaluates to a `chan T` (`channels.md` §2.2):
 
 ```vertex
-// Fire and forget (inline kickoff)
-async handleClient(conn.transfer())
+// Fire and forget
+async handleClient(var conn)
 
-// Inline anonymous background routines
-async func() {
+// Inline anonymous background routine
+async func() async {
     await do_background_work()
 }()
 
-// Kick off and wait later via the returned channel
+// Kick off now, wait later through the returned channel
 let task = async fetch_data()
-let result = await task.receive() 
-
+let result = await task.receive()
 ```
+
+Three details in those six lines:
+
+* **`var conn` is the transfer marker** (`ownership.md` §3). A spawned task outlives
+  the statement that spawned it, so the connection must be moved into it, not shared
+  with a caller that may drop it. There is no `.transfer()` method — `transfer` is a
+  reserved name bound to nothing precisely so that `conn.transfer()` diagnoses
+  against this rule.
+* **The anonymous function carries its own `async` marker.** A function literal
+  begins with all enclosing parse context cleared and re-establishes it from its own
+  marker (grammar, *Function literals*), so an inner body that awaits must say
+  `async` itself — it does not inherit the enclosing function's.
+* **`async` followed by `.` is a namespace, not a prefix.** One token of lookahead
+  decides: `async fetch_data()` is a launch, `async.Readable(fd)` is a member call
+  (§8). Same treatment `gpu` and `npu` get.
 
 ---
 
 ## 4. When to Use `async`
 
-**Rule:** Mark a function `async` only if there is a code path where the kernel can return a "not ready" state.
+**Rule:** mark a function `async` only if there is a code path where the kernel can
+return "not ready."
 
 | Call | Can the kernel delay? | Declared `async`? |
 | --- | --- | --- |
@@ -82,64 +137,109 @@ let result = await task.receive()
 | `conn.setNoDelay(true)` | No (applied instantly) | No |
 | `clock.now()` | No (reads monotonic counter) | No |
 
-**Warning on Blocking:** Putting a synchronous, blocking function (like a heavy `while` loop or OS sleep) inside an `async` function will block the underlying OS thread, starving the event loop. For intentional delays, use `await time.Sleep()`.
+Marking a function that never suspends costs its callers the coloring for nothing.
+
+**Warning on blocking.** Putting a synchronous blocking operation inside an `async`
+function blocks the underlying OS thread and starves the event loop — every other
+task on that reactor stops. The forms that do this:
+
+* a heavy compute loop (hand it to `thread` instead),
+* an OS sleep (use `await time.Sleep()`),
+* a bare `ch.receive()` (`channels.md` §3.1 — use `await ch.receive()`),
+* a `ch.send(v)` into a full buffer (`channels.md` §3.2 — there is no awaited send),
+* a blocking syscall on a fd that was not opened non-blocking (§8.5).
 
 ---
 
 ## 5. `select{}` Multiplexing
 
-`select{}` dispatches per `case` by the receiver's static type, seamlessly racing multiple awaited tasks or channels against each other. Every case must be a channel receive operation (`.receive()` / `.tryReceive()`) — see `channels.md` §4.1. To race a standalone `async` call (rather than an explicit `chan T`), spawn it first with the `async` call-site prefix (`async.md` §3), which hands back a `chan T`, and put the `.receive()` on *that* in case position:
+`select{}` races several channel operations and proceeds with the first one ready.
+It is specified in `channels.md` §4; two points bear repeating here because they are
+easy to assume wrongly:
+
+* **Every case is a channel receive.** `.receive()` or `.tryReceive()` on a
+  `chan T`, and nothing else. A standalone `async` call is not admissible in case
+  position — spawn it first with the `async` prefix (§3), which hands back a
+  `chan T`, and put the `.receive()` on *that*.
+* **`select{}` adds no waiting behaviour of its own.** It does not dispatch on a
+  case's static type and does not race heterogeneous sources. Each case waits
+  exactly as `.receive()` waits in the enclosing context — inside an `async`
+  function, that means every case is `await`ed and the whole statement suspends the
+  task.
 
 ```vertex
 let connReadTask = async conn.read(buf)
+let computeTask  = async compute()
 
 select {
-case n, err = await connReadTask.receive():
-    // Reactor submission via `await`
-case v = await computeTask.receive():
-    // Channel wait via `chan T`
+case let n, err = await connReadTask.receive():
+    print(n)
+case let v = await computeTask.receive():
+    print(v)
 }
-
 ```
+
+Both cases above are awaited; mixing an awaited case with a bare one in a single
+statement is illegal (`channels.md` §4.3).
 
 ---
 
 ## 6. Custom Reactors
 
-Vertex defaults to `builtins/async` (wrapping `io_uring`/`kqueue`), but does not force a runtime. Developers can write their own dispatch loops against platform primitives if the default reactor's scheduling policy requires tuning.
+Vertex defaults to `builtins/async` (wrapping `io_uring` / `kqueue` / `epoll`), but
+does not force a runtime. A developer can write a dispatch loop against platform
+primitives directly if the default reactor's scheduling policy needs tuning. §8
+describes the exact seam this hangs off.
 
 ---
 
 ## 7. Language Comparison: Concurrency Models
 
-Different languages approach I/O multiplexing with distinct architectural tradeoffs. Vertex aligns with the explicit readability of Rust and JavaScript, while adopting the lightweight kickoff ergonomics of Go.
-
 | Feature | Golang | JavaScript | Rust | Vertex |
 | --- | --- | --- | --- | --- |
-| **Architecture** | Stackful (Goroutines) | Event Loop (Promises) | Stackless State Machine | Stackless State Machine |
+| **Architecture** | Stackful (goroutines) | Event loop (promises) | Stackless state machine | Stackless state machine |
 | **Spawning** | `go func()` | Implicit | `tokio::spawn()` | `async func()` |
-| **Detection** | Runtime | Statically Marked | Statically Marked | Statically Marked |
+| **Detection** | Runtime | Statically marked | Statically marked | Statically marked |
 | **Contagious?** | No | Yes (`async`/`await`) | Yes (`async`/`.await`) | Yes (`async`/`await`) |
-| **Memory / GC** | GC-managed heap | GC-managed heap | Zero-cost / No GC | Zero-cost / No GC |
+| **Memory / GC** | GC-managed heap | GC-managed heap | Zero-cost / no GC | Zero-cost / no GC |
+
+Vertex aligns with the explicit readability of Rust and JavaScript while adopting the
+lightweight kickoff ergonomics of Go.
 
 ### 7.1 Stackless Performance Gains
 
-Stackless architectures (Rust, Kotlin, Vertex) compile suspension points into flat, discrete state machines rather than pausing entire execution stacks. This yields specific performance advantages over Stackful architectures (Go, OS threads):
+Stackless architectures compile suspension points into flat, discrete state machines
+rather than pausing entire execution stacks. Two advantages over stackful models
+(Go, OS threads):
 
-1. **Lower Memory Footprint:** Stackful models must allocate a minimum stack block (e.g., Go's initial 2KB per goroutine). Stackless models allocate only the exact byte-width of the variables kept alive across the suspend point, allowing millions of concurrent waits in fractions of the memory.
-2. **Faster Context Switching:** Waking a stackless task is a direct function call branching on an integer state tag. Waking a stackful task requires swapping out CPU registers and stack pointers, which carries higher latency.
+1. **Lower memory footprint.** A stackful model must allocate a minimum stack block
+   (Go's initial 2 KB per goroutine). A stackless one allocates only the exact byte
+   width of the variables kept alive across the suspend point, allowing millions of
+   concurrent waits in a fraction of the memory.
+2. **Faster context switching.** Waking a stackless task is a direct function call
+   branching on an integer state tag. Waking a stackful task requires swapping CPU
+   registers and stack pointers, which carries higher latency.
 
-### 7.2 The Golang Tradeoff (Why it lacks coloring)
+### 7.2 The Golang Tradeoff (Why It Lacks Coloring)
 
-Golang famously avoids function coloring (explicit `async`/`await`), but this comes at a strict architectural cost: **runtime interception**.
+Go famously avoids function coloring, at a strict architectural cost: **runtime
+interception**. It achieves the colorless design by routing all network and file
+operations through its own standard library, which silently intercepts blocking
+syscalls and parks the goroutine on a hidden background event loop. Ergonomic, but
+for systems programming the tradeoffs are severe:
 
-Go achieves its colorless design by forcing all network and file operations through its own standard library, which silently intercepts blocking syscalls and parks the goroutine on Go's hidden background event loop. While ergonomic, the tradeoffs for systems programming are severe:
+* **No custom reactors.** You cannot build your own async flow from scratch or swap
+  the event loop for a specialized `io_uring` or `kqueue` one.
+* **Kernel lock-in.** Newer native kernel features, custom kernels, and bare metal
+  all require porting the runtime scheduler.
+* **The FFI choke point.** Native C or C++ that blocks (via cgo) breaks the
+  illusion: the blocking call halts the underlying OS thread and starves the
+  scheduler.
 
-* **No Custom Reactors:** You cannot build your own async flow from scratch or swap out the event loop concept (e.g., dropping in a specialized `io_uring` or `kqueue` reactor).
-* **Kernel Lock-in:** You cannot easily utilize newer native kernel features or target custom/bare-metal OS kernels without porting and rewriting the massive Go runtime scheduler for that specific platform.
-* **The FFI Choke Point:** If you use native C or C++ methods that block (via cgo), Go's illusion breaks. The blocking C code will completely halt the underlying OS thread, starving the scheduler and severely degrading system performance.
-
-Vertex accepts function coloring (`async`/`await`) precisely to keep the runtime transparent and modular. By exposing the state machine explicitly, Vertex allows developers to write custom reactors (§6) and safely interop with C/C++ without hidden runtime heuristics breaking the system.
+Vertex accepts coloring precisely to keep the runtime transparent and modular. By
+exposing the state machine explicitly, it allows custom reactors (§6) and safe
+C/C++ interop without hidden heuristics — which is the same argument §8.1 makes at
+the level of a single primitive.
 
 ---
 
@@ -147,17 +247,40 @@ Vertex accepts function coloring (`async`/`await`) precisely to keep the runtime
 
 ### 8.1 Philosophy
 
-`async`/`await` (§1–§2) are the *language*'s suspension mechanism — they say "this function may yield." They say nothing about *what* it waits on. That's a separate, lower job: turning a kernel readiness fact into a suspension point. Vertex gives that job exactly two functions, and stops there deliberately — per §7.2, the alternative is Go's path, where the readiness primitive is hidden inside a standard library you can't swap out or build alongside.
+`async`/`await` (§1–§2) are the *language*'s suspension mechanism — they say "this
+function may yield." They say nothing about *what* it waits on. That is a separate,
+lower job: turning a kernel readiness fact into a suspension point. Vertex gives that
+job exactly two functions and stops there deliberately — per §7.2, the alternative is
+Go's path, where the readiness primitive is hidden inside a standard library you can
+neither swap out nor build alongside.
 
 ```vertex
-func async.Readable(fd: int32) async -> string
-func async.Writable(fd: int32) async -> string
+async.Readable(fd: int32) async -> string
+async.Writable(fd: int32) async -> string
 ```
 
-* **Scope: socket file descriptors.** These two functions suspend the calling task until the reactor observes `fd` as readable or writable, respectively, per the platform's poll primitive (`epoll`, `kqueue`, or an `io_uring` poll op). They are the exact primitive a socket wrapper needs to turn a `EAGAIN` from a non-blocking syscall into a real suspension instead of a busy-loop or a blocked thread.
-* **Not a socket type.** `Readable`/`Writable` take a bare `int32` — nothing about the fd's kind, protocol, or origin. They carry no opinion about what `fd` is; they only answer "is it ready." Any userspace wrapper (`TcpConn`, a Unix domain socket, a raw `LibC.socket()` call never wrapped at all) reaches the same two functions the same way.
-* **This is the seam custom reactors (§6) hang off of.** A reactor swap means reimplementing `Readable`/`Writable` against a different platform primitive — not rewriting every wrapper built on top of them.
-* **Other fd kinds are future scope, not a different name.** Pipes, `eventfd`, TTYs, and regular files raise distinct readiness questions (see the platform note below) and are deliberately left out of this pass. When they're added, they'll reuse `async.Readable`/`Writable` where the semantics genuinely match a socket's readiness model — new fd kinds are not a reason to mint new function names.
+> The two lines above describe **call shapes**, not declarations. A `FunctionName` is
+> an `identifier`, never a qualified one, so neither can be written as a `func` line
+> in Vertex source; they are reached as members of the `async` namespace (§3). This
+> is the same convention `memory.md` §0 uses for `new` and `delete`.
+
+* **Scope: socket file descriptors.** Both suspend the calling task until the
+  reactor observes `fd` as readable or writable, per the platform's poll primitive.
+  They are the exact primitive a socket wrapper needs to turn an `EAGAIN` from a
+  non-blocking syscall into a real suspension instead of a busy-loop or a blocked
+  thread.
+* **Not a socket type.** They take a bare `int32` — nothing about the fd's kind,
+  protocol, or origin. They carry no opinion about what `fd` is; they only answer
+  "is it ready." Any userspace wrapper (a `TcpConn`, a Unix domain socket, a raw
+  `LibC.socket()` call never wrapped at all) reaches the same two functions the same
+  way.
+* **This is the seam custom reactors (§6) hang off.** A reactor swap means
+  reimplementing these two against a different platform primitive — not rewriting
+  every wrapper built on top of them.
+* **Other fd kinds are future scope, not a different name.** Pipes, `eventfd`, TTYs,
+  and regular files raise distinct readiness questions (§8.6) and are deliberately
+  left out of this pass. When added, they will reuse `Readable`/`Writable` where the
+  semantics genuinely match a socket's readiness model.
 
 ### 8.2 Signature
 
@@ -166,11 +289,15 @@ func async.Writable(fd: int32) async -> string
 | `async.Readable(fd)` | No | Yes, until `fd` is readable | `string` — `""` on success, non-empty on reactor error (e.g. fd closed underneath the wait) |
 | `async.Writable(fd)` | No | Yes, until `fd` is writable | `string` — same convention |
 
-Errors follow the standard boundary-tuple convention (foundation §35): check the string before trusting that the wait resolved cleanly.
+Both return a bare `string` rather than a tuple, because there is no value to hand
+back — only success or failure (foundation §35.1). Check the string before trusting
+that the wait resolved cleanly.
 
 ### 8.3 The Retry Pattern
 
-`Readable`/`Writable` don't perform I/O themselves — they only resolve *when* a subsequent non-blocking syscall is worth retrying. Every socket operation in Vertex follows the same three-line shape:
+These don't perform I/O themselves — they resolve only *when* a subsequent
+non-blocking syscall is worth retrying. Every socket operation in Vertex follows the
+same shape:
 
 ```vertex
 while true {
@@ -189,40 +316,49 @@ while true {
 }
 ```
 
-Try the syscall → on `EAGAIN`, `await` the readiness function → retry. This is the entire mechanism; there is no hidden queuing or batching beneath it that a wrapper author needs to reason about.
+Try the syscall → on `EAGAIN`, `await` readiness → retry. That is the entire
+mechanism; there is no hidden queuing or batching beneath it a wrapper author needs
+to reason about.
 
 ### 8.4 Example — Socket Wrapper
 
 ```vertex
+package net
+build linux
+
+import "libc"
+
+struct TcpConn {
+    fd: int32
+}
+
 class TcpListener {
     fd: int32
 }
 
 func (l: TcpListener) accept() async -> (TcpConn, string) {
     while true {
-        var addr: SockAddrIn
-        var len:  socklen_t = sizeof(SockAddrIn) as socklen_t
+        var addr: LibC.SockAddrIn
+        var len:  LibC.socklen_t = sizeof(LibC.SockAddrIn) as LibC.socklen_t
 
         let fd, err = LibC.accept(l.fd, addr, len)
         if err == "" {
             return TcpConn{fd: fd}, ""
         }
         if err != "EAGAIN" {
-            return TcpConn{}, err
+            var zero: TcpConn
+            return zero, err
         }
 
         let werr = await async.Readable(l.fd)
         if werr != "" {
-            return TcpConn{}, werr
+            var zero: TcpConn
+            return zero, werr
         }
     }
 }
 
-struct TcpConn {
-    fd: int32
-}
-
-func (c: TcpConn) read(buf: mut []uint8) async -> (int32, string) {
+func (c: TcpConn) read(buf: mut []byte) async -> (int32, string) {
     while true {
         let n, err = LibC.read(c.fd, buf, buf.length as uint64)
         if err == "" {
@@ -260,12 +396,31 @@ func (c: TcpConn) write(buf: []byte, count: int32) async -> (int32, string) {
 }
 ```
 
-Nothing in `TcpListener`/`TcpConn` is compiler-privileged — this is exactly the code any developer writes to wrap a new fd kind. `async.Readable`/`Writable` are the entire contract between userspace and the reactor.
+Nothing in `TcpListener` / `TcpConn` is compiler-privileged — this is exactly the
+code any developer writes to wrap a new fd kind. `async.Readable` / `Writable` are
+the entire contract between userspace and the reactor.
+
+`TcpConn` is a struct, so `TcpConn{fd: fd}` is a composite literal and the error
+paths return `var zero: TcpConn`. Were it a class, both would change: a class is
+constructed only by calling an initializer (foundation §27), and `var zero: TcpConn`
+would be the only spelling available on the error path.
 
 ### 8.5 Precondition — Non-Blocking Fds
 
-`Readable`/`Writable` only make sense against a fd opened non-blocking (e.g. `SOCK_NONBLOCK` at `socket()` creation). Calling a blocking syscall against a fd and awaiting readiness afterward doesn't compose — the syscall would have already blocked the thread before `EAGAIN` ever had a chance to appear. Setting the non-blocking flag at fd creation is the caller's responsibility; §8.1–§8.4 assume it throughout.
+These make sense only against a fd opened non-blocking (e.g. `SOCK_NONBLOCK` at
+`socket()` creation). Calling a blocking syscall and awaiting readiness afterward
+doesn't compose — the syscall would already have blocked the thread before `EAGAIN`
+ever had a chance to appear, which is §4's warning in its most concrete form.
+Setting the flag at fd creation is the caller's responsibility; §8.1–§8.4 assume it
+throughout.
 
 ### 8.6 Platform Note — Scope Boundary
 
-`Readable`/`Writable` report real kernel readiness for sockets (and, by the same underlying mechanism, pipes and other poll-able fds) on every reactor backend (`epoll`, `kqueue`, `io_uring`). They are **not** currently specified for regular files: `epoll`/`kqueue` report a file fd as always-ready, so `Readable(fd)` on one returns immediately without a meaningful wait, while an `io_uring`-backed reactor could in principle give it real completion semantics. Resolving that gap — either by scoping file I/O to a `thread`-backed fallback or by giving files their own readiness contract — is left for a future revision, not solved by this section.
+`Readable`/`Writable` report real kernel readiness for sockets (and, by the same
+underlying mechanism, pipes and other poll-able fds) on every reactor backend
+(`epoll`, `kqueue`, `io_uring`). They are **not** currently specified for regular
+files: `epoll`/`kqueue` report a file fd as always-ready, so `Readable(fd)` on one
+returns immediately without a meaningful wait, while an `io_uring`-backed reactor
+could in principle give it real completion semantics. Resolving that gap — either by
+scoping file I/O to a `thread`-backed fallback or by giving files their own
+readiness contract — is left for a future revision, not solved by this section.
