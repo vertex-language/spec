@@ -1,6 +1,4 @@
-# Vertex Language Grammar
-
-## Grammar — Generics (Grammar Reference)
+## Generics
 
 ---
 

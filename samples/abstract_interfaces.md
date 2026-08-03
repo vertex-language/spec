@@ -1,6 +1,4 @@
-# Vertex Language Grammar
-
-## Grammar — Abstract Interfaces (Grammar Reference)
+## Abstract Interfaces
 
 ---
 

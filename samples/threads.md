@@ -1,6 +1,4 @@
-# Vertex Language Grammar
-
-## Specification — Threads
+## Threads
 
 ---
 

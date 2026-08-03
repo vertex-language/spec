@@ -1,6 +1,4 @@
-# Vertex Language Grammar
-
-## Grammar — Memory (`typed_ptr` & Pointer Arithmetic)
+## Memory (`typed_ptr` & Pointer Arithmetic)
 
 ---
 

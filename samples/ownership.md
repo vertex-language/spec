@@ -1,6 +1,4 @@
-# Vertex Language Grammar
-
-## Grammar — Ownership & Access (Grammar Reference)
+## Ownership & Access
 
 ---
 
