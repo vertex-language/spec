@@ -5,725 +5,648 @@ surfaces are specified elsewhere; nothing here depends on them.
 
 ---
 
-## 0. Terms
+## 0. Scope of This Document
 
-**Error** — the compiler must reject. **Unspecified** — one of several defined
-outcomes, none guaranteed. **Undefined** — no guarantee, nothing checks. Raw
-pointer operations are the only source of undefined behavior.
+Where `grammar.md` says "static rule," the rule is here. The grammar deliberately
+admits forms the language does not have, so that a reader gets a diagnostic naming
+the construct rather than a parse failure; §11 lists every one of them and what it
+is rejected as.
 
-**Owning position** — where a value becomes someone else's responsibility.
-Exactly six: the right-hand side of a declaration or assignment, an argument, an
-element of a tuple / array / map / composite literal, a returned expression, and
-the binding of a consuming `for` loop. Owning-ness does not propagate into
-subexpressions.
+Checking proceeds in four passes, and a later pass never changes an earlier one's
+answer:
 
-**Build tag** — a per-file target selector: `linux`, `windows`, `darwin`, `js`,
-`wasm`, `test`.
-
-**Boundary tuple** — the return shape `(T, string)`, the string empty on
-success. The only spelling for fallible or absent.
-
-**Marker** — `async`, `gpu`, `npu`, or `test` on a function signature.
-
----
-
-## 1. Names and Scope
-
-1. Scopes nest: package → file → function → block → statement.
-2. A declaration is visible from its declaration point to the end of its
-   enclosing block.
-3. Package-level declarations are visible throughout the package regardless of
-   order. Inside a function body, forward reference is an error.
-4. Redeclaring a name in one scope is an error. Shadowing is legal and silent.
-5. `_` declares nothing, binds nothing, and may not be read.
-6. A `declare` block introduces no scope: members are injected into the
-   enclosing package. Collision with a package-level name is an error.
-7. `build`, `init`, `deinit`, `error`, `framework`, `module`, and `test` are
-   ordinary identifiers outside the productions that name them.
-8. Reserved; not declarable as members, locals, or parameters: `new`, `delete`,
-   `resize`, `copy`, `zero`, `addr`, `sizeof`, `alignof`, `reinterpret`,
-   `upgrade`, `unique`, `shared`, `weak`, `drop`, `panic`, `blend`, `min`,
-   `max`, `clamp`.
-
----
-
-## 2. Types
-
-### 2.1 Identity
-
-1. Types are **nominal**. Two named types are identical only if they are the
-   same declaration.
-2. `type N = T` declares a new type whose **underlying type** is `T`'s
-   underlying type. `N` and `T` are never identical.
-3. `byte` is the sole transparent alias, of `uint8`: identical type,
-   interchangeable in both directions.
-4. Composite types are identical iff their components are identical, and for a
-   fixed array iff the lengths are equal.
-5. Each `type X = abstract` is a distinct type with no underlying type. Two
-   abstract types never unify.
-6. Two instantiations are identical iff the generic declaration and every type
-   argument are identical.
-
-### 2.2 Underlying type
-
-The underlying type of a predeclared or composite type is itself; of a declared
-alias, the underlying type of its target. Consulted in exactly two places: `~T`
-in a constraint type set, and rule 2.1.2.
-
-### 2.3 Assignability
-
-`V` may be assigned to a location of type `T` iff `V` and `T` are identical, or
-`V` is an untyped constant representable in `T`, or one of the two is `byte` and
-the other `uint8`, or `T` is a raw pointer type and `V` is `nil`.
-
-No implicit widening, no implicit conversion between a named type and its
-underlying type, no subtyping. This governs `vector[T, N]` unchanged: no
-widening between vector types differing in `T` or `N`, and no conversion between
-a vector and its element type.
-
-### 2.4 Ownership qualifiers
-
-`mut`, `var`, `unique`, `shared`, and `weak` qualify a type; none is a type.
-
-1. `mut T` and `var T` are legal only in parameter and receiver position. In a
-   field, local, return type, or type argument they are an error.
-2. `unique T`, `shared T`, `weak T` are ordinary types, legal wherever a type is.
-3. Qualifiers do not stack: `mut var T`, `unique unique T`, `mut shared T` are
-   errors.
-4. A `weak T` is constructible only from a `shared T`.
-
-### 2.5 Zero values
-
-Every type has a zero value: numeric zero, `false`, the empty string, the null
-character, a recursively zeroed struct or class, `nil` for a raw pointer, empty
-for a dynamic array or map, the first-declared variant for a unit enum, a zeroed
-handle for an abstract type, and `N` zero lanes for a `vector[T, N]`.
-
-`unique T`, `shared T`, and `weak T` have **no** zero value. Declaring one
-without an initializer is an error, as is using one where a zero value is
-required.
-
-An abstract handle's zero value is legal only as the value half of a failed
-boundary tuple, paired with a non-empty string. It is not comparable to `nil`
-and has no null-check form.
-
----
-
-## 3. Constants
-
-### 3.1 Untyped constants
-
-Literals are untyped until used.
-
-1. An untyped constant takes the type of its context if representable there.
-   `let b: int8 = 300` is an error.
-2. With no contextual type: integer → `int32`, float → `float64`, string →
-   `string`, char → `char`, bool → `bool`.
-3. `nil` is not a value and has no type; its two admissible positions are §6.7.
-
-### 3.2 Constant expressions
-
-Required for: fixed array lengths, tensor shapes, vector lane counts, enum
-discriminants, test expectation strings, interop variant tags.
-
-A constant expression is a literal, a reference to a constant-initialized
-declaration, a size or alignment query, or an operator applied to constant
-expressions. Anything else in these positions is an error. Constant arithmetic
-that overflows its target type is an error, not a wrap — unlike runtime
-arithmetic, which wraps silently.
-
----
-
-## 4. Bindings
-
-| | mutable | addressable | may feed `mut` | reassignable |
-| --- | --- | --- | --- | --- |
-| `let` | no | no | no | no |
-| `var` | yes | yes | yes | yes |
-
-1. Assigning to a `let` binding, or to a field reached through one, is an error.
-2. Passing a `let` binding to a `mut` parameter or receiver is an error: it is
-   not guaranteed to have an address.
-3. **Definite assignment.** Reading a binding is legal only if every path from
-   its declaration assigns it first. A `var` declared with a type and no
-   initializer counts as assigned, to that type's zero value.
-4. A declaration with neither initializer nor type annotation is an error.
-5. A multi-value destructure requires exact arity; `_` may absorb an element.
-6. A `let` binding may still be transferred — a transfer ends liveness rather
-   than mutating.
-
----
-
-## 5. Ownership
-
-### 5.1 Conventions
-
-A parameter or receiver declares exactly one:
-
-| Form | Callee receives | Call site |
+| Pass | Decides | Specified in |
 | --- | --- | --- |
-| `x: T` | shared access — read-only alias | bare |
-| `x: mut T` | exclusive access — mutating, non-owning | bare |
-| `x: var T` | ownership | bare for a copy, `var` for a transfer |
+| Select | which files are in the build | §1.2 |
+| Parse | the shape of each file | `grammar.md` |
+| Resolve | what every name denotes | §2 |
+| Check | types, conventions, and markers | §3–§9 |
 
-Shared and `mut` call sites never carry a marker; writing one is an error.
-
-### 5.2 The `var` marker
-
-At an owning position, applied to an existing binding or field path: prefixed
-with `var` it **transfers** (source dies, destination becomes sole owner); bare
-it **copies** (source stays live, destination independent).
-
-1. `var` is legal only at an owning position.
-2. `var` applies to an identifier or field path only. On a call, an index, an
-   arithmetic expression, or any other computed value it is an error.
-3. A freshly constructed value has no prior owner; the temporary is consumed
-   unconditionally.
-4. A `var` receiver has no argument slot for a marker, so calling such a method
-   **always** transfers the receiver — the only unmarked transfer in the
-   language. To keep the original, bind a copy first and call on that.
-5. Copying is not callable. It is what happens when `var` is absent.
-
-### 5.3 Liveness
-
-1. Using a binding after it has been transferred is an error.
-2. Liveness is flow-sensitive. If *any* path reaching a use transfers, the use
-   is an error. No runtime flag is inserted.
-3. Transferring, inside a loop body, a binding declared outside that loop is an
-   error.
-4. One call may not transfer the same binding twice, nor read it while
-   transferring it.
-5. Transferring a field makes the whole enclosing binding unusable. There is no
-   partial-move re-initialization.
-
-### 5.4 Exclusivity
-
-**Law:** aliasing or mutation over one region, never both at once.
-
-1. Two arguments of one call may not both be `mut` over overlapping storage.
-2. A `mut` argument may not overlap a shared argument of the same call.
-3. A `mut` argument may not overlap the receiver.
-4. Overlap is computed over field paths. `a` and `a.b.c` overlap; `a.b` and
-   `a.c` do not; two subscripts of one container are assumed to overlap.
-5. A slice view is a live shared borrow of the buffer it views: while the view
-   is live, mutating or transferring that buffer is an error. When the view is
-   the destination of `copy` writing a vector store (§10.4), or is passed to a
-   `mut` parameter, it holds a `mut` borrow instead. The two borrow kinds are
-   mutually exclusive on one view.
-6. Exclusivity is checked entirely statically.
-
-### 5.5 What a copy costs
-
-1. A thin value copies by register move. `vector[T, N]` and the lane predicate
-   are thin: no deep-copy path, and `var` transfer on either is legal and
-   identical to a copy in emitted code, though the marker still affects
-   liveness.
-2. An owning fat value — string, dynamic array, map, capturing closure, unique
-   heap value — duplicates its payload.
-3. A slice view duplicates the view, never the buffer.
-4. A `shared T` copies the handle only.
-5. An **abstract handle cannot be copied**: accessed or transferred only. A bare
-   copy at an owning position is an error.
-6. Neither a vector nor a lane predicate has a teardown; a struct or class
-   containing one is not thereby non-trivial to tear down.
-7. Cost never affects legality. An expensive copy is a lint.
-
-### 5.6 Heap and weak references
-
-1. `unique(e)` and `shared(e)` consume `e` as construction; the copy/transfer
-   reading does not apply.
-2. `shared(u)` promoting a unique value is the only promotion. There is no path
-   back.
-3. `weak(a)` requires a `shared T`. A weak reference to a unique value, a stack
-   value, or a raw pointer is an error.
-4. `upgrade(w)` requires a `weak T` and yields `(shared T, string)`.
-5. Reaching a weak reference's payload without `upgrade` is an error.
-6. A `deinit` body may reach its owner only through `upgrade`.
+Two resolutions belong to the *Resolve* pass and are called out because they are
+the only places meaning decides shape: `a[i]` is an instantiation or an index by
+what `a` denotes (§5.4), and a name in a type-set position is a type or a
+constraint by what it denotes (generics §3.3).
 
 ---
 
-## 6. Expressions
+## 1. Programs, Packages, Files
 
-### 6.1 Operators
+### 1.1 Packages
 
-| Operator | Requires | Yields |
+A package is the set of selected files carrying the same `PackageName`. All of them
+are compiled together, and **top-level declarations are order-independent**: a
+declaration may reference any other in its package regardless of position or file.
+Functions, methods, and types may therefore be mutually recursive without
+forward declarations.
+
+There is no visibility modifier in Vertex (grammar, *Declare blocks*). Every
+top-level declaration in a package is reachable by any file that imports it.
+
+### 1.2 Build Tags
+
+A `BuildClause` is a *selection* rule, applied before parsing anything else:
+
+* No clause — the file is in every build.
+* A clause naming the target — the file is in this build.
+* A clause naming another target — the file is out of this build entirely, and
+  nothing in it is checked.
+* An unrecognized tag — a compile error, never a silent exclusion (foundation §34).
+
+Two constructs require a clause rather than merely permitting one:
+
+| Construct | Requires | Because |
 | --- | --- | --- |
-| `+ - *` | one identical numeric type, or one identical `vector[T, N]` | that type |
-| `/` | one identical numeric type, or one identical float `vector[T, N]` | that type |
-| `%` | one identical numeric type | that type |
-| `&+ &- &*` | one identical integer type, or one identical integer `vector[T, N]` | that type, wrapping |
-| `& \| ^ ~` | integer operands, or one identical integer `vector[T, N]` | the left operand's type |
-| `<< >>` | integer operands (count may be any integer), or an integer `vector[T, N]` with an integer scalar count | the left operand's type |
-| `== !=` | identical types | `bool`, except two identical `vector[T, N]`, which yield a lane predicate (§10.5) |
-| `< <= > >=` | identical ordered types: numeric, string, char; or two identical `vector[T, N]` | `bool`, except the vector case, which yields a lane predicate (§10.5) |
+| `declare framework` / `declare module` | any tag | linkage is derived from it (abstract_interfaces §0) |
+| an `ExpectedType` result | `build test` | foundation §36.2 |
+
+The diagnostic names the construct, not the missing clause.
+
+### 1.3 Imports
+
+Imports are **file-scoped**: an `import` in one file of a package does not bring the
+qualifier into the others. The qualifier is the imported package's own
+`PackageName`, never the path (foundation §30).
+
+* The import graph must be acyclic. A cycle is a compile error naming the whole
+  cycle.
+* Two imports whose packages declare the same `PackageName` are a compile error;
+  there is no aliasing form to resolve the clash with.
+* An import no declaration in that file reaches is a compile error. Because file
+  selection is whole-file (§1.2), an import can never be conditionally live.
+
+### 1.4 `main`
+
+A program has exactly one package named `main` declaring exactly one `func main()`
+— no parameters, no result, no marker. It is the one non-`async` function in which
+`await` is legal (async §2.2).
+
+---
+
+## 2. Names and Scopes
+
+### 2.1 The Four Scopes
+
+| Scope | Contains | Extent |
+| --- | --- | --- |
+| universe | predeclared names (§2.3) | every file of every package |
+| package | every top-level declaration | every file of that package |
+| file | the file's imported qualifiers | that file |
+| local | parameters, type parameters, bindings, payload bindings | the construct that introduces them |
+
+A local scope opens at every `Block`, at a `Signature`'s parameter list, at a
+`TypeParameters` list, and at each `CaseClause`/`SelectClause` statement list. A
+binding is visible from its declaration to the end of its scope; a type parameter is
+visible across its entire list and the whole declaration that follows it
+(generics §1).
+
+Method names are not in any of these scopes — they are reached only through a
+receiver, so a method `read` and a function `read` in one package do not collide.
+
+### 2.2 Shadowing
+
+An inner scope may shadow an outer one. Within a single scope a name is declared
+once: two parameters, two fields, two type parameters, or two locals in one block
+with the same spelling are an error.
+
+**Vertex has no overloading.** One name denotes one declaration. The multiple `func`
+lines shown for `new` (memory §11.1) describe builtin call shapes, not declarations
+a user can write.
+
+### 2.3 Predeclared Names
+
+The universe scope holds four families, each with its own legality rule. All are
+ordinary identifiers — no scanner recognizes them.
+
+| Family | Names | Legal |
+| --- | --- | --- |
+| Types | `int`…`uint64`, `byte`, `float32/64`, `bool`, `char`, `string` | wherever a `Type` is |
+| Constraints | `any`, `comparable` | only in a `"["`…`"]"` position, never as a `Type` |
+| Tensor element types | `bf16`, `fp8e4m3`, `fp8e5m2`, `int4` | only inside an `npu` body (accel §2.2) |
+| Reserved builtins | `new delete resize copy zero addr sizeof alignof reinterpret upgrade drop panic blend min max clamp transfer` | callable per their own documents |
+
+`int` and `uint` are the target's pointer width and are distinct types from
+`int64`/`uint64` even where the widths agree. `byte` is an alias for `uint8`, not a
+distinct type (foundation §4.1). `char` is one Unicode scalar value.
+
+**Reserved builtin names may not be shadowed** — not as a local, parameter, type
+parameter, field, method, or top-level declaration, and not as a parameter label
+(memory §11.1). That guarantee is what lets `sizeof`, `alignof`, and `reinterpret`
+be recognized by name in a `TypeOperatorCall`. Every other predeclared name is
+shadowable in an inner scope, and doing so is a lint, not an error.
+
+`transfer` is reserved and bound to nothing, so `x.transfer()` and `transfer(x)`
+diagnose against ownership §3.3 rather than as unknown names.
+
+### 2.4 The Blank Identifier
+
+`_` is an ordinary `identifier` token that introduces no binding and may be
+repeated freely. It is accepted, and means "discard," in exactly these positions:
+
+```vertex
+var _: int32                  // declaration
+let a, _ = pair               // destructure
+_ = compute()                 // assignment target
+case .Color(r, _, _):         // payload binding
+func f[_, T](x: T)            // unused type parameter
+for _, n in nums              // iteration binding
+```
+
+Anywhere else — a field name, a package name, a parameter name, a method name, a
+selector, a type name — `_` is an error. Reading `_` is always an error: it names
+nothing.
+
+---
+
+## 3. Types
+
+### 3.1 Identity
+
+Declared types (`struct`, `class`, `enum`) are **nominal**: two declarations are
+distinct types even with identical fields, and each `abstract` alias is distinct
+from every other (abstract_interfaces §1).
+
+Type literals are **structural**: two `func` types are the same type when their
+parameter types, marker, and result agree — parameter *names* are not part of the
+type (foundation §31). `[N]T` carries `N` in its identity; `[8]int32` and
+`[16]int32` are unrelated.
+
+A `TypeAliasDecl` introduces a second name for one type, interchangeable with the
+first in both directions and at every depth of composition. The distinction between
+an alias and its target survives in exactly one place: a type set, where a bare `T`
+admits `T` only and `~T` admits every type whose **underlying type** is `T`
+(generics §3.1). A declared type's underlying type is the type its declaration
+names; a type literal's underlying type is itself.
+
+### 3.2 Where a Type May Appear
+
+| Type | Legal position |
+| --- | --- |
+| `mut T`, `var T` | a parameter or receiver only — including a `func` type's parameters; never a result, field, local, or type argument |
+| `unique T`, `shared T`, `weak T` | anywhere a `Type` is |
+| `typed_ptr T` | anywhere a `Type` is, but never the direct base of another `PointerType` (memory §2.1), and never a receiver type |
+| `chan T` | anywhere a `Type` is |
+| `tensor[T, …]` | inside an `npu` body or that function's own signature (accel §2.2) |
+| `vector[T, N]` | anywhere except a `gpu`/`npu` body or signature, a foreign boundary, or a map key (accel §3.4) |
+| `abstract` | only as the target of a `TypeAliasDecl` |
+| a constraint name | only in a `"["`…`"]"` position |
+| `Expected(…)` | only as a `FunctionDecl`/`MethodDecl` result, in a `build test` file |
+
+Ownership qualifiers do not stack: `mut shared T` parses (the recursion is
+unguarded) and is rejected as a stacked qualifier.
+
+A `ReceiverType` is a `TypeName`, so a method may be declared only on a struct,
+class, or enum **declared in the same package**. There are no methods on type
+literals, on predeclared types, or on imported types.
+
+### 3.3 Zero Values
+
+Every type has a zero value, so there is no definite-assignment analysis anywhere in
+the language. A declaration with a type and no initializer *is* its zero value, which
+is what foundation §35.5 and generics §6 rely on.
+
+| Type | Zero |
+| --- | --- |
+| numeric | `0` |
+| `bool` | `false` |
+| `char` | U+0000 |
+| `string` | `""` |
+| struct, class | every field zeroed — field **defaults are not applied**; they belong to construction (§7.2) |
+| `[N]T`, tuple, `vector`, `tensor` | elementwise zero |
+| enum | the first declared variant, with any payload zeroed |
+| `[]T`, `map[K]V` | empty |
+| `typed_ptr T` | `nil` (memory §13) |
+| `func` type | an unset function; calling it panics |
+| `chan T` | a closed, empty channel |
+| `unique T`, `shared T`, `weak T` | an empty handle; reading through it panics, and `upgrade` of a zero `weak` reports failure |
+| `abstract` | the zeroed representation — legal **only** on an error path, paired with a non-empty string (abstract_interfaces §2) |
+
+The only memory in a Vertex program that is not zero-initialized is a block from
+`new(…, zeroed: false)` (memory §11.1).
+
+### 3.4 Size and Recursion
+
+Every type has a size known at compile time. A type may not contain itself by value,
+directly or through a cycle of struct/class/array/tuple fields — the size would not
+terminate. Break the cycle with an indirection, all of which are one word:
+`unique T`, `shared T`, `weak T`, `typed_ptr T`, `[]T`, `map[K]V`, or `chan T`.
+
+Recursive *instantiation* must terminate for the same reason (generics §8).
+
+### 3.5 `comparable` and `Ordered`
+
+`==` and `!=` require a type satisfying `comparable`; `<`, `<=`, `>`, `>=` require
+`constraints.Ordered`.
+
+| | Members |
+| --- | --- |
+| `comparable` | numerics, `bool`, `char`, `string`, `typed_ptr T`, enums, and any struct, class, tuple, or `[N]T` whose every component is comparable |
+| `Ordered` | numerics and `string` (generics §4) |
+| neither | `[]T`, `map[K]V`, `chan T`, `func` types, `vector`, `tensor`, `abstract`, and the three heap handles |
+
+`==` on a class compares values; `===` asks whether two bindings name the same
+object and is legal on classes only (foundation §14). `==` on a `typed_ptr` already
+compares addresses, so `===` does not apply to one.
+
+---
+
+## 4. Assignability and Conversion
+
+### 4.1 Assignability
+
+A value is assignable to a destination when their types are **identical** (§3.1).
+There is no subtyping, no coercion, and no promotion. A marker is part of a `func`
+type, so a `func(int32)` is not assignable to a `func(int32) async`.
+
+Two things relax this, both narrow:
+
+1. **Untyped literals.** A literal has no type until it lands; where a destination
+   type exists the literal takes it, and where none does it falls back to the
+   defaults in foundation §6.1. A literal whose value does not fit its destination
+   is a compile error, not a wraparound. This applies to literals only — the moment
+   a value has been bound, returned, or read, §4.2 governs.
+2. **The two stated implicit conversions**, both scoped and both listed in §4.3.
+
+### 4.2 Conversion — `as`
+
+Every width, signedness, or representation change between *values* is written
+(foundation §6).
+
+| From → to | Meaning |
+| --- | --- |
+| integer → integer | truncates or sign-extends; the written form is the permission |
+| float → integer | truncates toward zero; a value outside the destination's range traps (§5.5) |
+| integer → float | rounds to nearest, ties to even |
+| enum → its discriminant type | one-way only; there is no `n as Status` (foundation §26.4) |
+| `typed_ptr T` → `typed_ptr U` | static reinterpretation, never a read (memory §7) |
+| `typed_ptr T` ↔ integer | address value, never inferred |
+| `abstract` → `typed_ptr T` | only where linkage is memory-flat (memory §8); never the reverse |
+
+The predeclared numeric types do not take the constructor spelling — write
+`i as float32`, not `float32(i)`. The tensor element types are the single exception:
+`bf16(val)` is the form there, and `val as bf16` is not (accel §2.4).
+
+### 4.3 The Two Implicit Conversions
+
+| Where | What | Bounded by |
+| --- | --- | --- |
+| a `gpu`/`npu` launch site | `[N]T` ↔ `tensor[T, N]`, element type and shape matching exactly | the launch expression itself (accel §2.1) |
+| a pointer cast with a written destination | `typed_ptr T` → `typed_ptr U` with `as` elided | both sides pointer types (memory §7) |
+
+Neither reaches inside a body, and no third case is added anywhere.
+
+---
+
+## 5. Expressions
+
+### 5.1 Operand Rules
+
+| Operator | Operands | Result |
+| --- | --- | --- |
+| `+ - * / %`, unary `-` | one numeric type, both sides identical | that type |
+| `+` on `string` | two `string` | `string` (concatenation) |
+| `&+ &- &*` | one integer type | that type, wrapping |
+| `& \| ^ ~` | one integer type | that type |
+| `<< >>` | integer left, integer right | the left type |
+| `== !=` | one `comparable` type | `bool` |
+| `< <= > >=` | one `Ordered` type | `bool` |
 | `=== !==` | two values of one class type | `bool` |
-| `&& \|\| !` | `bool` | `bool` |
-| `..` | identical integer types | a range |
+| `&& \|\| !` | `bool` only, short-circuiting | `bool` |
+| `..` | one integer type, non-associative | not a value (§5.2) |
+| `as` | a value and a `Type` | the `Type` |
+| `&` | a value, or a `typed_ptr T` | address-of, or `T` |
 
-1. Mixed-type arithmetic is an error; write a conversion. This includes mixing a
-   vector with its own element type — there is no broadcasting, only the
-   explicit splat constructor (§10.4).
-2. `%` on floats is an error. `/` and `%` on an integer vector are both errors:
-   no mainstream target has either as a single instruction.
-3. `===` on a struct, enum, primitive, vector, or lane predicate is an error.
-   Identity is a class-only question.
-4. `&&` and `||` short-circuit; that is their only dynamic property.
-5. Division or remainder by a constant zero is an error. By a runtime zero, a
-   scalar traps; a float vector does not — IEEE division by zero produces an
-   infinity, lane-wise.
-6. A range is exclusive of its upper bound, and empty when the lower bound is
-   not less than the upper. There is no inclusive form.
+There is no promotion and no truthiness: an `if`, `while`, or `&&` operand must be a
+`bool`, and a non-empty integer is not one.
 
-### 6.2 Conversions and casts
+Elementwise operators on tensors and lane-wise operators on vectors are the two
+places these rules widen, and both are specified in `accel.md` (§2.3, §3.3). A
+`vector` comparison yields a lane predicate, which has no source spelling and may
+not be an `if` condition, a `&&` operand, a field, or a channel element.
 
-1. `T(x)` and `x as T` are static, total, and differ only in spelling. Both are
-   errors in either direction when `T` or `x`'s type is `vector[T, N]`; lane
-   conversion is spelled as the constructor instead (§10.4).
-2. Legal: numeric to numeric; a unit enum to or from its discriminant type; raw
-   pointer to raw pointer; raw pointer to or from a word-width unsigned integer.
-3. An abstract handle converts to a raw pointer only when the handle came from a
-   **memory-flat** import — every import under `linux`, `windows`, `wasm`, and
-   non-framework `darwin`. Handles from **object-graph** imports — JavaScript
-   and every Darwin framework — have no byte representation; converting one is
-   an error.
-4. There is no conversion from a raw pointer to an abstract handle, in any
-   spelling. Abstract handles are minted at the foreign boundary only.
-5. Float to integer truncates toward zero and traps when out of range.
-   Lane-wise float-to-integer conversion (§10.4) follows the same rule, trapping
-   when any lane is out of range.
-6. Every other conversion is an error. No dynamic cast exists.
+### 5.2 Ranges Are Not Values
 
-### 6.3 Indexing and slicing
+`a..b` has no type and cannot be bound, returned, passed, or stored. It is
+admissible in exactly three positions (foundation §13): a `for`'s iterable, a
+bracket position where it makes a slice, and a `switch` case. Both endpoints are one
+integer type; the range is always exclusive of `b` and empty when `a >= b`.
 
-1. `a[i]` requires a fixed array, dynamic array, map, or `vector[T, N]`. The
-   index must be an integer for arrays and vectors, or assignable to the key
-   type for maps.
-2. A constant index provably outside a fixed array, or outside a vector's lane
-   range, is an error. A runtime index on an array is bounds-checked at runtime;
-   a runtime index on a vector is an error outright (§10.6).
-3. `a[i..j]` requires an array and yields a slice view. Slicing a map, string,
-   or vector is an error.
-4. Raw pointers index through their read and write methods only; bracket
-   indexing on one is an error.
-5. `Ident[T]` is a generic instantiation when `Ident` names a generic
-   declaration, and an index otherwise.
-6. Subscripting a tensor is an error in every form.
+### 5.3 Constant Expressions
 
-### 6.4 Calls
+A constant expression is a literal, a unary or binary operation over constant
+expressions, an `as` conversion of one, `sizeof`/`alignof`, or an enum discriminant.
+It contains no call, no binding, and no field read. Constants are required in:
 
-1. Argument count must match. A variadic parameter absorbs zero or more trailing
-   arguments, each assignable to the element type.
-2. Arguments may be positional or named; mixing is legal only with every
-   positional argument preceding every named one.
-3. A named argument must name a declared parameter, and no parameter twice.
-4. Arguments evaluate left to right.
-5. A marked function called without its launch form, or a launch form applied to
-   an unmarked function, is an error in both directions.
+* an `ArrayLength` — and it must be a non-negative integer,
+* an enum's explicit discriminant,
+* a top-level `VarDecl` initializer,
+* a `switch` case pattern,
+* `new`'s `align:` argument, where it must be a power of two.
 
-### 6.5 Fields and methods
+Three positions are stricter still and require a bare *literal token*, which is why
+`-1000` — unary minus over a literal — is not admissible in any of them
+(foundation §1): a `ShapeList`, a `VectorType`'s lane count, and a `TupleIndex`.
+A `TupleIndex`'s literal must additionally be decimal with no `"_"`.
 
-1. `x.f` requires `f` declared on `x`'s own type. There is no inheritance, no
-   embedding, no resolution order.
-2. Calling a `mut`-receiver method requires the receiver expression to be
-   addressable and mutable.
-3. Calling a `var`-receiver method transfers the receiver.
-4. `x.0` and `x.1` require a tuple of that arity; named tuple fields are reached
-   by name.
-5. An abstract handle has no fields and no methods; everything callable on one
-   is declared for it at the boundary.
+### 5.4 Calls
 
-### 6.6 Address-of and dereference
+* Arity must match. A variadic parameter absorbs zero or more trailing arguments of
+  its element type.
+* Arguments are positional or named; a named argument uses the parameter's declared
+  name. **A single call may not mix the two forms.**
+* Named arguments may be written in any order; positional ones may not.
+* The callee's marker fixes the call form (§7.4).
+* `Stack[int32]` is an instantiation and `a[i]` an index, decided by whether the
+  operand denotes a generic declaration (generics §5.4). An `Index` on a
+  non-generic, non-indexable operand is an error naming both readings.
 
-Both spell as `&`; direction is read from the operand's type.
+### 5.5 Trapping
 
-1. `&x` where `x` is a raw pointer **dereferences**. Otherwise it takes the
-   address.
-2. Direction keys on the **statically written** type, so a source line never
-   changes meaning between instantiations. Inside a generic body, `&x` where `x`
-   has a type-parameter type is always address-of, including when that parameter
-   is instantiated as a pointer.
-3. `addr(p)` yields the address of a pointer binding itself. It requires a raw
-   pointer operand and an addressable one; on any other type it is an error.
-4. `&e = v` requires `e` to be a raw pointer and `v` assignable to its pointee.
+These are checked at runtime and abort the program (§10). They are not the error
+tuple, because none of them is a condition a caller could have handled:
 
-### 6.7 `nil`
+| Form | Trap |
+| --- | --- |
+| overflow of `+ - * /` or unary `-` | yes — use `&+ &- &*` to wrap |
+| division or `%` by zero | yes |
+| a shift count at or beyond the left operand's width | yes |
+| `[]T` / `[N]T` subscript out of range | yes (foundation §22.4) |
+| a constant subscript provably out of range on a `[N]T` | compile error instead |
+| a `vector` load whose window runs past a fixed array | compile error if constant, trap if not |
+| `float → int` conversion out of range | yes |
+| container allocation failure | yes (foundation §22.2) |
 
-`nil` is admissible in exactly two positions: as a raw pointer value, and as the
-right-hand side of a map index assignment, where it erases the entry.
-
-Everywhere else it is an error — including comparing any non-pointer against it,
-and ordering any pointer against it.
-
-### 6.8 Closures
-
-1. Captures are by value, fixed at closure creation.
-2. Assigning to a captured binding inside the body is an error.
-3. Writeback is spelled as a `mut` parameter, never as a capture.
-4. A closure that captures nothing and one that captures something share a type
-   spelling but not a representation; only the non-capturing form crosses a
-   foreign boundary (§12.6).
+`typed_ptr` operations are the opposite tier and check nothing (memory §14.3).
 
 ---
 
-## 7. Functions
+## 6. Statements
 
-### 7.1 Declarations
+### 6.1 Declarations
 
-1. Parameter names are unique; `_` is permitted.
-2. A variadic parameter must be last, and there may be at most one.
-3. A function with a return type must return on every path.
-4. Returning values from a void function, or returning bare from a
-   value-returning one, is an error.
-5. Return arity must match the declared arity exactly.
+`let` requires an initializer and fixes the *binding*; `var` may be rebound and is
+required by anything taking exclusive access or transferring. Neither says anything
+about the value: a `let`-bound class's fields are still writable through a `mut`
+method, but the binding must be `var` for that call (foundation §2).
 
-### 7.2 Receivers, `init`, `deinit`
+A `var` with a type and no initializer is that type's zero value (§3.3). A bare
+`var w` — no type, no initializer — is an error: there is nothing to infer from.
+When `w` also names a live binding, the diagnostic is the more useful one, *transfer
+outside owning position*, which is precisely why the grammar gives the form a
+declaration node to hang it on.
 
-1. A receiver type must be declared in the same package.
-2. `init` and `deinit` are declarable on classes only.
-3. At most one `deinit` per class; it takes no parameters and returns nothing.
-4. A class may declare several initializers distinguished by name. The unnamed
-   one backs bare construction; a named one backs qualified construction.
-5. An `init` must leave every field definitely assigned on every path.
-6. A `deinit` may not transfer the receiver or any of its fields.
-7. A receiver may be plain, `mut`, `var`, or `shared`. `unique` or `weak` is an
-   error.
+A top-level `VarDecl` takes a constant initializer (§5.3), and the bare
+`"var" Binding` form is rejected there outright.
 
-### 7.3 Markers and coloring
+Binding lists and initializer lists must agree in count, either one-to-one or as a
+single call whose result tuple has that arity (foundation §29.5).
 
-| Marker | Call form | Body |
+### 6.2 Assignment
+
+An `AssignTarget` is a `PrimaryExpr`, and it is assignable when it is:
+
+* a `var` binding,
+* a field of an assignable value, or of any class or `shared`/`unique` handle,
+* an element of an assignable `[N]T`, or of any `[]T` or `map[K]V`,
+* a dereference `&p` of a `typed_ptr`,
+* the blank identifier.
+
+Everything else — a `let` binding, a call result, a slice of a shared view, a tuple
+index of a temporary — is not. Assignment is a statement, so no `=` appears in any
+condition in the language.
+
+The right-hand side of an assignment is an owning position (§8.2).
+
+### 6.3 Control Flow
+
+* `if` and `while` conditions are `bool`. `if` has no initializer clause.
+* `for` iterates a range, `[N]T`, `[]T`, `map[K]V`, or `string`, and nothing else —
+  there is no user-extensible iterator protocol. The two-name form is
+  index/value for arrays, key/value for maps.
+* The `IterationBinding` marker and the two-name form do not combine, and `var` on
+  the *iterable* rather than the binding is rejected (foundation §21.2).
+* `break` and `continue` apply to the innermost loop; there are no labels. Neither
+  is admissible in an `npu` body (accel §2.5).
+
+### 6.4 Switch
+
+* Every pattern must be assignable to the subject's type, and constant (§5.3).
+* Two clauses may not match a common value the compiler can see — duplicate
+  constants and overlapping constant ranges are errors.
+* A `switch` over an enum must be **exhaustive**: cover every variant or write
+  `default`. Every other switch may fall out the bottom.
+* At most one `default`, in any position.
+* `fallthrough` must be the last statement of a non-final clause, and the clause it
+  falls into may not bind payloads — there would be nothing to bind them from.
+* An `EnumPattern`'s payload entries are fresh binding names scoped to that clause,
+  and are **views** into the payload, not copies. They may not be assigned through.
+
+### 6.5 Select
+
+The rules are stated in `channels.md` §4 and are static rules in full:
+
+1. Every case is `.receive()` or `.tryReceive()` on a `chan T`.
+2. One statement is entirely bare or entirely `await`ed.
+3. At most one `default`, which makes the whole statement non-blocking.
+4. Bindings introduced by a `ChannelCase` are scoped to that clause.
+
+### 6.6 Return and Defer
+
+A `ReturnStmt`'s expression list must match the enclosing signature's result slot
+for slot. A call yielding a tuple cannot be forwarded whole into a multi-slot
+result — destructure first (foundation §29.6). A function with no result may write
+`return` bare and must not write a value.
+
+`defer` takes a call. Its callee and arguments are evaluated at the `defer`
+statement; the call runs when the enclosing function returns, in reverse order of
+registration. Deferred calls do not run on `panic` (§10).
+
+---
+
+## 7. Functions, Methods, and Markers
+
+### 7.1 Signatures
+
+* Parameter names in one `Parameters` list are all present or all absent. A bare
+  `FunctionType` names types only.
+* At most one variadic parameter, and it is last.
+* A signature carries **at most one** `FunctionMarker`. More parses and is rejected.
+* Omitting the result is the void form; there is no `void` type and no unit type.
+
+### 7.2 Receivers, Construction, and Destruction
+
+| Receiver | Meaning | Call site |
 | --- | --- | --- |
-| `async` | `await f()`, or `async f()` to spawn | may contain `await` |
-| `gpu` | `gpu f()`, optionally with a launch config | unrestricted |
-| `npu` | `npu f()` | restricted, §11.2 |
-| `test` | not callable | §13 |
+| `(x: T)` | shared, read-only | bare |
+| `(x: mut T)` | exclusive; the binding must be `var` | bare |
+| `(x: var T)` | consuming — always transfers | bare; there is no second form to pick |
+| `(x: shared T)` | shared handle | bare |
 
-1. A function carries at most one marker.
-2. The marker must agree at both ends, in both directions.
-3. `await` is legal only inside an `async` body, or in `main`.
-4. `await f()` yields the value. `async f()` spawns and yields a receive
-   channel; awaiting that channel yields the value later.
-5. `thread` is a call prefix and never a marker. The callee's declaration is
-   unaffected by any call site that spawns it.
-6. A launch keyword immediately followed by `.` is a namespace reference.
-7. A blocking call inside an `async` body is a lint, not an error.
-8. A launch config, where present, must supply both a block count and a thread
-   count.
+A method may **not** declare its own `TypeParameters`; a receiver's list re-declares
+the receiver type's existing names rather than introducing fresh ones (generics §9).
+A constraint written on the type is in force inside every method and is not restated.
+
+`init` and `deinit` are ordinary method names recognized by spelling:
+
+* Both receivers are implicitly exclusive and written bare — an explicit qualifier
+  on one is an error.
+* `init` declares no result; **an initializer has no error channel** (foundation
+  §27). A construction that can fail is an ordinary function returning a boundary
+  tuple.
+* `deinit` takes no parameters and declares no result.
+* At most one of each per type.
+
+**Construction.** A struct is built by a composite literal; a class is built by
+calling an initializer, and `Animal{}` constructs nothing. A composite literal must
+name each field without a default exactly once, may name them in any order, and may
+not name a field the type does not have. Field defaults are evaluated at each
+construction for each omitted field, and may not reference other fields or the
+value under construction.
+
+**Destruction.** A value dies at the end of the block that declares it, in reverse
+order of declaration; a field dies with the value that holds it, in reverse order of
+declaration. `deinit` runs first, then the fields. A binding that has been
+transferred away is already dead and is not destroyed again (§8.3).
+
+### 7.3 Closures
+
+A function literal captures by value at creation. Reading a captured binding is
+legal; **writing one is a compile error** — the copy is not the original
+(foundation §32). Write-back goes through a `mut` parameter.
+
+A function literal begins with all enclosing parse context cleared: an inner body
+that awaits must carry its own `async` marker. A closure that captures anything at
+all may not cross a foreign boundary, even read-only
+(abstract_interfaces §6).
+
+### 7.4 Markers and Call Forms
+
+The marker is part of the function's type, so it is checked at the declaration and
+again at every call. **The marker must agree at both ends**: a marked function
+cannot be called bare, and an unmarked one cannot be called with a launch prefix.
+
+| Marker | Legal call forms |
+| --- | --- |
+| none | `f(x)`, `thread f(x)` |
+| `async` | `await f(x)`, or `async f(x)` to spawn |
+| `gpu` | `gpu f(x)`, `gpu(blocks: b, threads: t) f(x)` |
+| `npu` | `npu f(x)` |
+| `test` | none — the harness invokes it |
+
+Further rules:
+
+* `await` is legal only inside an `async`-marked body or `main` (async §2.2). Its
+  operand is a call to an `async`-marked function or a channel receive.
+* `thread` takes an unmarked callee. `thread` over a marked one is an error.
+* A launch prefix modifies scheduling only; it never changes the callee's signature.
+* `gpu` and `npu` launches are synchronous and hand back a host-typed value;
+  `thread` and `async` hand back a `chan T` (channels §0).
+* A `LaunchConfig` writes both `blocks:` and `threads:`, in that order.
+* `async`, `gpu`, and `npu` followed by `"."` are namespace references, not prefixes
+  (accel §0.2).
+* A `test` function takes no parameters, carries an `Expected` result or none, and
+  exists only in a `build test` file.
 
 ---
 
-## 8. Generics
+## 8. Values, Ownership, and Lifetime
 
-1. Type parameter names are unique within a list; `_` is permitted. A
-   parameter's scope begins after its own name, so a later parameter may be
-   constrained in terms of an earlier one.
-2. A bare parameter is constrained by `any`.
-3. Two constraints are predeclared: `any` and `comparable`.
-4. **A method may not declare its own type parameters.** A receiver re-declares
-   the receiver type's list to bring those names into scope; introducing a new
-   one is an error.
-5. Constraint satisfaction is checked once per instantiation, at the
-   instantiation site. In a type set, `~T` admits every type whose underlying
-   type is `T`; a bare `T` admits only `T`.
-6. **The operations available on a type-parameter value are exactly those its
-   constraint grants.** Under `any`: assignment, argument passing, and the
-   ownership operations. Equality requires `comparable`; ordering requires an
-   ordered type set; arithmetic a numeric one. Everything else is an error,
-   reported against the declaration, not the instantiation.
-7. Inference applies when every parameter is fixed by a value argument, reaching
-   through composite arguments. A parameter appearing only in the return type
-   must be supplied explicitly. Inference either succeeds or fails; the compiler
-   never partially infers.
-8. A constraint in value position is an error.
-9. `~T` outside a type set is an error.
-10. Instantiation must terminate. A cycle whose type arguments grow without
-    bound is an error, detected by depth limit.
-11. A generic declaration is fully checked even if never instantiated — its body
-    is checked against the constraint, not against any concrete type.
+`ownership.md` is the full treatment. This section states the parts the checker
+enforces.
 
----
+### 8.1 Conventions
 
-## 9. Aggregates and Enums
+The convention lives in the signature; only the owning one has a choice at the call.
 
-1. Field names are unique within a declaration.
-2. A field may not have the enclosing type directly; an indirection through
-   `unique`, `shared`, `weak`, a dynamic array, or a raw pointer breaks the
-   cycle. A `vector[T, N]` field is legal without indirection.
-3. A composite literal names its fields. Positional struct literals do not
-   exist. Omitted fields take their zero value; omitting a field whose type has
-   no zero value is an error.
-4. A class differs from a struct in its member model only — never in storage,
-   assignability, or copying.
-5. Enum variant names are unique within the enum. Explicit discriminants must be
-   constant, distinct, and representable in the declared discriminant type;
-   omitted ones continue from the previous.
-6. A payload-carrying enum may not declare a discriminant type.
-7. Converting an enum to an integer is legal for unit-only enums.
-8. Leading-dot variant shorthand is legal only where the enum type is fixed by
-   context: an annotation, a parameter type, or a switch subject.
-9. A `switch` over an enum with no `default` must cover every variant.
+```vertex
+func f1(x: T)          // shared    — bare, caller keeps the value
+func f2(x: mut T)      // exclusive — bare, caller's binding must be `var`
+func f3(x: var T)      // owning    — bare copies, `var` transfers
+```
 
----
+### 8.2 The Transfer Marker
 
-## 10. Vectors
+`"var"` in expression position is legal only in an **owning position**: the
+right-hand side of a declaration or assignment, an argument, an element of a
+tuple/array/map/composite literal, a returned expression, or a consuming `for`
+binding. Owning-ness does not propagate into subexpressions.
 
-`vector[T, N]` is one CPU SIMD register — a distinct storage class from `[]T`
-and `tensor[T, S...]`. No value crosses between the three implicitly.
+Its operand must be a binding or a field path. `var f(a)` and `var items[0]` parse
+and are rejected — there is nowhere for a transfer out of a temporary or an element
+to leave a hole.
 
-### 10.1 Well-formedness
+### 8.3 Liveness
 
-1. `T` must be a scalar numeric type: `int8`–`int64`, `uint8`–`uint64`,
-   `float32`, `float64`. Everything else is an error.
-2. `N` must be an integer literal from `{2, 4, 8, 16, 32, 64}`. A non-literal
-   constant expression is an error.
-3. `byte` and `uint8` remain interchangeable (§2.1.3), so `vector[byte, 16]` and
-   `vector[uint8, 16]` are the same type.
-4. Two vector types are identical iff `T` and `N` are both identical.
+* A transferred binding is dead. Any later use is an error naming the transfer.
+* Transfers chain, and each kills its source.
+* A binding transferred on *some* paths is treated as transferred on all of them.
+* A transfer in a loop body is rejected outright: the second iteration would move a
+  dead binding.
+* Within one call, a binding may not be transferred twice, nor transferred and read.
 
-### 10.2 Zero value
+Neither rule evaluates a condition or a trip count. Both are positional.
 
-`N` zero lanes. `var v: vector[float32, 8]` with no initializer is legal and
-definitely assigned to that value.
+### 8.4 Exclusivity
 
-### 10.3 Where vectors are illegal
+No two arguments of one call may reach the same value if either is `mut`, and the
+receiver counts as one of the paths — which is what catches an overlap running
+through a field (ownership §9).
 
-1. Inside a `gpu` or `npu` body, or in either marker's signature.
-2. As a parameter or result crossing a foreign boundary (§12.5.1).
-3. As a `map` key type — vector equality yields a lane predicate, not `bool`, so
-   `comparable` is not satisfied.
+`typed_ptr T` is the one type these rules do not reach. Two copies are two unchecked
+aliases, and exclusivity there is convention rather than proof.
 
-Vectors are legal as struct and class fields, as array elements, as channel
-element types, and under `unique`, `shared`, or `weak`.
+### 8.5 Cost
 
-### 10.4 Construction
-
-`VectorType(...)` is a compiler intrinsic with three signatures, disambiguated
-by argument shape:
-
-1. **Splat** — one argument assignable to `T`, need not be constant. Every lane
-   takes that value.
-2. **Load** — two arguments: a slice or array whose element type is identical to
-   `T` (not merely convertible), and an integer index. Reads `N` consecutive
-   elements from there. Bounds-checked by comparing `i + N` against the source's
-   length, trapping on failure — unless the index is a constant provably out of
-   range on a fixed array, which is a compile-time error and emits no check. The
-   first argument is a shared borrow for the call's duration.
-3. **Lane conversion** — one argument of type `vector[T2, N]`, same `N`, `T2` a
-   scalar numeric type not identical to `T`. Each lane converts:
-   float-to-integer truncates toward zero and traps on any lane out of range;
-   integer-to-float and integer-to-integer do not trap. Changing `N` is not
-   supported.
-
-`copy` is additionally overloaded as the vector store: when its destination is a
-slice view of constant length `N` and its source is a `vector[T, N]`, the
-lengths must match exactly (a view of any other constant length, or of runtime
-length, is an error), the viewed buffer must be reachable through a `mut` or
-`var` binding, and the destination view holds a `mut` borrow for the call
-(§5.4.5).
-
-### 10.5 Operations and the lane predicate
-
-Operands of a vector operation must match exactly in both `T` and `N`. There is
-no broadcasting; a scalar operand alongside a vector operand is an error, and
-splat construction is the explicit form for that case.
-
-`==`, `!=`, `<`, `<=`, `>`, `>=` on two identical vector types yield a **lane
-predicate**: a value carrying `(T, N)` — `N` boolean lanes at `T`'s lane width.
-This is the only exception to §6.1's "yields `bool`" rule.
-
-The lane predicate has no source spelling: no type name, no `TypeName`
-production, no `PredeclaredTypeName` entry. It is produced only by a vector
-comparison, and consumed only by `blend` (§10.7) and by `&`, `|`, `^`, `~` on
-two predicates of identical `(T, N)`, which yield a predicate. `min`, `max`, and
-`clamp` do not consume it.
-
-1. A lane predicate is not a `bool`. It is an error as the condition of an `if`
-   or `while`, as a `switch` subject, and as an operand of `&&`, `||`, or `!`.
-2. It has no field, array element, channel element, global, parameter, or return
-   position — it cannot be named in a signature.
-3. It never crosses a foreign boundary.
-4. It has no indexing form, no method, and no field access.
-
-### 10.6 Extraction
-
-`v[k]` yields lane `k` as a `T`, legal only when `k` is a constant expression in
-range. A runtime index is an error. There is no lane-assignment form: `v[2] = x`
-is always an error.
-
-Because `N` is always a literal, `v[0] + v[1] + … + v[N-1]` is legal Vertex, so
-horizontal reduction needs no dedicated builtin.
-
-### 10.7 `blend`, `min`, `max`, `clamp`
-
-Four reserved free-function names (§1.8), each a single instruction on every
-target:
-
-| Form | Requires | Yields |
+| Type | Bare copy | `var` transfer |
 | --- | --- | --- |
-| `blend(m, a, b)` | `a`, `b` identical `vector[T, N]`; `m`'s carried `(T, N)` identical to theirs | `vector[T, N]`, lane `i` from `a` where `m`'s lane `i` is true, else from `b` |
-| `min(a, b)`, `max(a, b)` | `a`, `b` identical `vector[T, N]` | `vector[T, N]`, lane-wise |
-| `clamp(v, lo, hi)` | all three identical `vector[T, N]` | `vector[T, N]`, lane-wise |
+| scalars, `typed_ptr T` | register move | same; source marked dead |
+| struct, class, `[N]T` | fieldwise copy | header move, O(1) |
+| `string`, `[]T`, `map[K]V` | deep-copies the payload | O(1) |
+| `unique T` | allocates and deep-copies the pointee | O(1) |
+| `shared T`, `chan T` | refcount increment | O(1), no count change |
+| `weak T` | weak-count increment | O(1) |
 
-`blend`'s matching rule is exact: matching `N` alone is insufficient, since a
-predicate from a `float32` comparison and a `vector[int8, 8]` destination agree
-on lane count but not lane width. None of the four is callable as a method.
-
-### 10.8 Ownership and cost
-
-A vector and a lane predicate are thin values (§5.5.1): copying is a register
-move, `var` transfer is legal and identical to a copy in emitted code (the
-marker still affects liveness), and neither has a teardown. Neither is
-addressable in the sense that forces a stack slot, except by the ordinary
-triggers — `mut` passing, `addr`, closure capture, liveness across an `await` —
-and a lane predicate can reach none of these (§10.5.2).
+Under generics the cost is fixed by the concrete type at instantiation, so a lint on
+large owned types fires per instantiation, not per declaration.
 
 ---
 
-## 11. Device Code
+## 9. Generics and Constraints
 
-### 11.1 `gpu`
+`generics.md` is the specification; three rules matter to every other document.
 
-The body is unrestricted. Arguments and results are ordinary host types, and the
-call returns its value directly. `vector[T, N]` is illegal in a `gpu` body or
-signature (§10.3.1).
+1. **The declaration is checked once, on its own terms.** The operations available
+   on a `T` are exactly those its constraint permits, whatever the instantiations in
+   the program happen to supply. Under `any` that is assignment, argument passing,
+   and the ownership operations — no `<`, no `==`, no `+`, no field access.
+2. **Constraint satisfaction is checked per instantiation**, at the instantiation
+   site, and a failure is a compile error there.
+3. **Inference either succeeds or fails.** A type parameter appearing only in the
+   result must be supplied explicitly. `new` and `resize` are the one stated
+   exception, scoped to a destination whose pointer type is already written down
+   (memory §11.1).
 
-### 11.2 `npu`
-
-1. Tensor types are legal only inside an `npu` body or that function's own
-   signature; elsewhere they are an error. `vector[T, N]` is illegal inside an
-   `npu` body or signature (§10.3.1).
-2. Two element types are signature-eligible: `float32` and `int8`. The reduced
-   and quantized types are body-only; one in a signature is an error.
-3. Shape entries must be constant integer literals.
-4. Subscripting a tensor is an error — element access is through elementwise
-   operators and the device namespace only.
-5. Elementwise operands must agree exactly in element type and shape. The
-   explicit broadcast operation is the only broadcast.
-6. An `if` or `switch` selector must be scalar; per-element choice is the select
-   operation.
-7. In a `while`, every loop-carried binding must keep identical type, shape, and
-   element type across iterations. `break` and `continue` are errors.
-8. The device namespace is a closed set. Declaring, shadowing, or extending a
-   member is an error.
+A `ConstraintDecl` takes no type parameters, is legal only in a `"["`…`"]"`
+position, and is never a value type. Multiple elements in its body are an
+intersection; `|` within one element is a union.
 
 ---
 
-## 12. Channels, `select`, and Interop
+## 10. Errors, Panics, and Undefined Behaviour
 
-### 12.1 Channels
+Vertex has three tiers, and nothing moves between them.
 
-1. A channel is constructed with an element type and an optional non-negative
-   capacity.
-2. Sending is an owning position: the value copies or transfers by the ordinary
-   marker rule.
-3. A channel element type must have a zero value, since the non-blocking receive
-   returns a boundary tuple. A `vector[T, N]` qualifies; a lane predicate cannot
-   be named as a channel element type at all (§10.5.2).
-4. `.receive()` blocks the calling thread when written bare, and suspends the
-   task when written under `await`. The two are distinguished by the `await`,
-   never by the channel.
+| Tier | Shape | For |
+| --- | --- | --- |
+| Condition | the boundary tuple — `(T, string)`, or a bare `string` (foundation §35) | anything a caller could reasonably handle: I/O, parsing, absence, allocation through `new` |
+| Bug | `panic(string)` and the traps of §5.5 | a broken invariant: a bad index, an overflow, an exhausted container |
+| Undefined | nothing | `typed_ptr` misuse only (memory §14.3) |
 
-### 12.2 `select`
+Absence and failure share the tuple channel; there is no optional type, no
+propagation operator, and no general `nil`. `nil` belongs to `typed_ptr T` and to
+nothing else.
 
-1. Every case must be a blocking or non-blocking receive on a channel. Any other
-   expression in case position is an error.
-2. One `select` is entirely bare or entirely awaited. Mixing is an error.
-3. Awaited cases are legal only inside an `async` body.
-4. At most one `default`, and it makes the whole statement non-blocking.
-
-### 12.3 Declare blocks — placement
-
-1. A `declare` block requires a build tag in its file.
-2. `declare framework` is legal only under `darwin`; under any other build tag
-   it is an error.
-3. `declare framework` never takes a variant tag.
-4. A `declare module` containing a class selects a default convention by build
-   tag:
-
-   | Build tag | Default |
-   | --- | --- |
-   | `darwin`, `linux` | C++, Itanium ABI, exceptions on |
-   | `windows` | raw C++ vtable call |
-   | `js` | ordinary object/class call shape |
-
-5. A variant tag overrides that default and is drawn from a closed set:
-   `"windows"`, `"com"`, `"cxx"`, `"no-exceptions"`. An unknown tag, a
-   contradictory pair, or one inapplicable to the file's build tag is an error.
-6. Omitting the tag selects the default. The bracket narrows an existing default
-   and never grants a capability the default lacks.
-
-### 12.4 Declare blocks — contents
-
-A declare block describes call shapes only. Inside one, each of these is an
-error: a function or method **body**; a **field** in a foreign class; a
-**visibility modifier**; an **ownership qualifier**; a second unnamed
-initializer; an initializer returning anything but the enclosing foreign class;
-a nested declare block.
-
-### 12.5 Boundary types
-
-1. A parameter or result must be a primitive, a string, an array or mutable
-   array, a `mut` scalar out-parameter, a raw pointer, an abstract handle, or a
-   tuple of these. `vector[T, N]` is none of these and is an error here
-   (§10.3.2).
-2. A layout-dependent foreign type crossing directly — a foreign struct by
-   value, a template instance — is an error. Wrap it behind an abstract handle
-   and expose accessors.
-3. The boundary tuple is the shape for a fallible foreign call. It is a
-   convention on the Vertex side; nothing verifies it against the foreign
-   library.
-
-### 12.6 Callbacks
-
-Only a non-capturing function crosses a boundary. Passing a capturing closure to
-a foreign parameter is an error: the foreign slot holds one word, the closure is
-two, and nothing foreign will own the environment.
-
----
-
-## 13. Errors, Panics, Tests
-
-1. The boundary tuple is a **convention**. Nothing forces a fallible function to
-   adopt it, and nothing forces a caller to check the string. There is no
-   propagation operator.
-2. What is enforced: destructure arity, and that the value on a declared error
-   path is a well-formed value of its type. That it is the *zero* value is not
-   verified.
-3. `panic` does not return. Code after it in the same block is unreachable, and
-   a `panic` satisfies the requirement that every path return.
-4. Test-marked functions are legal only in a file built under the `test` tag.
-5. A test's declared expected type must match its return type, and the expected
-   string is compared against that type's emitted formatting.
-6. An expectation of failure inverts the judgment: the body is expected not to
-   compile, and a body that compiles is a **test failure**, not a compile error.
-   An expectation carrying a string additionally requires the diagnostic to
-   match.
-
----
-
-## 14. Program
-
-1. Exactly one `main`, in package `main`, taking no parameters. It may contain
-   `await` without carrying the `async` marker; it is the reactor root.
-2. A file's build tag gates whether its declarations enter the package. An
-   excluded file is still parsed and syntax-checked.
-3. Import cycles between packages are an error, and so is self-import.
-4. An unused import is a lint, not an error.
-
----
-
-## 15. Ordering the Rules Depend On
-
-Semantic guarantees; the rules above are unsound without them.
-
-1. Arguments evaluate left to right.
-2. Fields tear down in reverse declaration order; locals in reverse declaration
-   order.
-3. `defer` bodies run in reverse registration order, on every exit edge of their
-   scope — fall-through, `return`, `break`, and `continue` alike. With no
-   unwinder, "every exit edge" is a finite static set.
-4. A transferred binding's teardown is not emitted; the obligation moves to the
-   destination.
-
-Rule 4 is why §5.3.2 rejects conditional transfer: the moment "was it
-transferred?" becomes a runtime question, the language would need a per-binding
-flag, so it forbids the question instead.
+`panic` does not return. It terminates the program: deferred calls do not run, no
+`deinit` runs, and there is no catch, recover, or unwind. That is what makes the
+first tier the only one worth writing recovery code against — and it is why the
+compiler does **not** enforce that a caller checks the error string. The convention
+is explicit-over-automatic in both directions.
