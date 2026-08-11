@@ -1,72 +1,68 @@
-namespace main
+namespace llama
 
-// The declare module block is both the declaration and the binder; ES named imports are removed[cite: 3, 8].
-// Introduces layout-free types whose definitions live in C[cite: 3].
+use native
+use linux
+
+// Opaque — definitions live in llama.cpp, and every one of these is only ever
+// reached through a pointer.
 declare struct llama_model
 declare struct llama_context
+declare struct llama_vocab
+declare struct llama_sampler
 
-// Binds a native library and triggers the linker[cite: 3].
+// llama_token is int32_t. Aliasing it costs nothing and reads better at the
+// call sites below.
+// (no `type` alias form in the grammar — spelled int32 throughout)
+
+// llama_batch is passed by value and its layout is public. Pointers into
+// caller-owned arrays; nothing here owns anything.
+struct llama_batch {
+  n_tokens: int32
+  token: mutable_ptr<int32> | null
+  embd: mutable_ptr<float32> | null
+  pos: mutable_ptr<int32> | null
+  n_seq_id: mutable_ptr<int32> | null
+  seq_id: mutable_ptr<mutable_ptr<int32>> | null
+  logits: mutable_ptr<int8> | null
+}
+
 declare module "llama" {
-  // Functions inside a declare module block are never fallible[cite: 3].
-  // Use the `func` keyword for functions[cite: 4].
   export func llama_backend_init(): void
   export func llama_backend_free(): void
 
-  // Declared structs are legal only behind a pointer[cite: 3].
-  // C pointers are nullable by default; Vertex bindings must explicitly spell absence via unions[cite: 3].
-  export func llama_load_model_from_file(path_model: const_ptr<byte>): mutable_ptr<llama_model> | null
-  export func llama_new_context_with_model(model: mutable_ptr<llama_model>): mutable_ptr<llama_context> | null
+  export func llama_model_free(m: mutable_ptr<llama_model>): void
+  export func llama_free(c: mutable_ptr<llama_context>): void
 
-  export func llama_free(ctx: mutable_ptr<llama_context>): void
-  export func llama_free_model(model: mutable_ptr<llama_model>): void
-}
+  export func llama_model_get_vocab(
+      m: const_ptr<llama_model>): const_ptr<llama_vocab>
 
-// Reference type heap-allocated with an inline refcount header[cite: 10].
-class LlamaWrapper {
-  // Raw pointers are non-nullable by default; absence is spelled as an explicit union[cite: 9].
-  private model: mutable_ptr<llama_model> | null
-  private ctx: mutable_ptr<llama_context> | null
+  export func llama_vocab_n_tokens(v: const_ptr<llama_vocab>): int32
+  export func llama_vocab_is_eog(v: const_ptr<llama_vocab>, t: int32): bool
 
-  constructor(path: const_ptr<byte>) {
-    llama_backend_init()
-    
-    // Semicolons are removed from the language[cite: 4].
-    this.model = llama_load_model_from_file(path)
-    
-    // Unwraps the nullable result securely using if let, avoiding unsafe null pointer passing[cite: 3, 4].
-    if let unwrapped_model = this.model {
-      this.ctx = llama_new_context_with_model(unwrapped_model)
-    } else {
-      this.ctx = null
-    }
-  }
+  export func llama_tokenize(
+      v: const_ptr<llama_vocab>,
+      text: const_ptr<byte>, text_len: int32,
+      out: mutable_ptr<int32>, out_len: int32,
+      add_special: bool, parse_special: bool): int32
 
-  // Teardown hook[cite: 4].
-  destructor() {
-    // Parenthesis-free control flow and if let used to unwrap nullable pointers[cite: 4].
-    if let unwrapped_ctx = this.ctx {
-      llama_free(unwrapped_ctx)
-    }
-    
-    if let unwrapped_model = this.model {
-      llama_free_model(unwrapped_model)
-    }
-    
-    llama_backend_free()
-  }
-}
+  export func llama_token_to_piece(
+      v: const_ptr<llama_vocab>, t: int32,
+      buf: mutable_ptr<byte>, buf_len: int32,
+      lstrip: int32, special: bool): int32
 
-func main(): int32 {
-  // The only route from an integer to a pointer[cite: 6]. 
-  // let is used for immutable block-scoped bindings[cite: 4].
-  let mock_addr: mutable_ptr<byte> = pointer_from_address<byte>(usize(0x4002_0000))
-  
-  // Pointer-to-pointer reinterpretation[cite: 6].
-  let path: const_ptr<byte> = pointer_cast<byte>(mock_addr)
+  export func llama_batch_get_one(
+      tokens: mutable_ptr<int32>, n: int32): llama_batch
 
-  // Object construction uses make_shared in the Unmanaged tier instead of the `new` keyword[cite: 9].
-  let llama: shared_ptr<LlamaWrapper> = make_shared<LlamaWrapper>(path)
-  
-  // int32 numeric primitive return[cite: 7].
-  return 0
+  export func llama_decode(
+      c: mutable_ptr<llama_context>, b: llama_batch): int32
+
+  export func llama_sampler_sample(
+      s: mutable_ptr<llama_sampler>,
+      c: mutable_ptr<llama_context>,
+      idx: int32): int32
+
+  export func llama_sampler_accept(
+      s: mutable_ptr<llama_sampler>, t: int32): void
+
+  export func llama_sampler_free(s: mutable_ptr<llama_sampler>): void
 }

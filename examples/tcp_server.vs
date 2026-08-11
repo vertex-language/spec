@@ -1,123 +1,185 @@
-namespace main
+namespace tcpserver
 
-// Mirrors C's `struct sockaddr_in` at the extern boundary.
-struct SockAddrIn {
-  readonly sin_family: uint16
-  readonly sin_port: uint16
-  readonly sin_addr: uint32
-  readonly sin_zero: FixedArray<byte, 8>
+use native
+use linux
 
-  constructor(family: uint16, port: uint16, addr: uint32) {
-    this.sin_family = family
-    this.sin_port = port
-    this.sin_addr = addr
-    this.sin_zero = FixedArray<byte, 8>()
-  }
-}
+// ---------------------------------------------------------------------------
+// libc
+//
+// One resolver on linux — the library search path — so the specifier is bare
+// and needs no scheme. `-lc`. Taken entirely on trust: the compiler never reads
+// a header, and a signature that disagrees with the real symbol fails at link
+// time.
+// ---------------------------------------------------------------------------
 
-declare module "libc" {
-  export func socket(domain: int32, type: int32, protocol: int32): int32
-  export func setsockopt(
-    sockfd: int32,
-    level: int32,
-    optname: int32,
-    optval: mutable_ptr<int32>,
-    optlen: uint32
-  ): int32
-  export func bind(sockfd: int32, addr: mutable_ptr<SockAddrIn>, addrlen: uint32): int32
-  export func listen(sockfd: int32, backlog: int32): int32
-  export func accept(
-    sockfd: int32,
-    addr: mutable_ptr<SockAddrIn> | null,
-    addrlen: mutable_ptr<uint32> | null
-  ): int32
-  export func read(fd: int32, buf: mutable_ptr<byte>, count: usize): int64
-  export func write(fd: int32, buf: mutable_ptr<byte>, count: usize): int64
+declare struct sockaddr
+
+declare module "c" {
+  export func socket(domain: int32, kind: int32, protocol: int32): int32
+  export func setsockopt(fd: int32, level: int32, opt: int32,
+                         val: void_ptr, len: uint32): int32
+  export func bind(fd: int32, addr: const_ptr<sockaddr>, len: uint32): int32
+  export func listen(fd: int32, backlog: int32): int32
+  export func accept(fd: int32,
+                     addr: mutable_ptr<sockaddr> | null,
+                     len: mutable_ptr<uint32> | null): int32
+  export func read(fd: int32, buf: mutable_ptr<byte>, n: usize): int64
+  export func write(fd: int32, buf: const_ptr<byte>, n: usize): int64
   export func close(fd: int32): int32
-  export func htons(hostshort: uint16): uint16
-  export func htonl(hostlong: uint32): uint32
-  export func puts(s: string): int32
+  export func htons(a: uint16): uint16
+  export func __errno_location(): mutable_ptr<int32>
 }
 
 const AF_INET: int32 = 2
 const SOCK_STREAM: int32 = 1
 const SOL_SOCKET: int32 = 1
 const SO_REUSEADDR: int32 = 2
-const INADDR_ANY: uint32 = 0
-const PORT: uint16 = 8080
-const BACKLOG: int32 = 16
-const BUF_LEN: usize = 1024
+const EINTR: int32 = 4
 
-// 2 + 2 + 4 + 8 with natural alignment and no tail padding. If the layout ever
-// needs pinning, `@align(N)` on the struct is the spelling — not a literal here.
-const SOCKADDR_IN_LEN: uint32 = uint32(sizeof<SockAddrIn>())
+const BACKLOG: int32 = 128
+const BUFSIZE: usize = 4096
 
-// Writes the full buffer, looping over short writes. false means the peer is
-// gone or the descriptor errored.
-func writeAll(fd: int32, base: mutable_ptr<byte>, total: int64): bool {
-  var sent: int64 = int64(0)
-  while sent < total {
-    let n: int64 = write(fd, base.offset(int32(sent)), usize(total - sent))
-    if n <= int64(0) {
-      return false
-    }
-    sent = sent + n
-  }
-  return true
+func errno(): int32 {
+  return __errno_location()[0]
 }
 
-// Echoes until the peer closes. Buffer is inline in this frame — no allocation.
-func handleClient(clientFd: int32): void {
-  var buf: FixedArray<byte, 1024> = FixedArray<byte, 1024>()
-  let base: mutable_ptr<byte> = addressof(buf[0])
+// ---------------------------------------------------------------------------
+// Boundary struct
+//
+// A real `struct` with fixed layout, not a `declare struct` — this one is
+// written by us and passed by pointer, so its fields have to line up with the
+// C definition. Natural alignment already gives 16 bytes; no @packed needed.
+// ---------------------------------------------------------------------------
 
-  while true {
-    let bytesRead: int64 = read(clientFd, base, BUF_LEN)
-    if bytesRead <= int64(0) {
-      return   // 0 = orderly shutdown, negative = read error
+struct sockaddr_in {
+  sin_family: uint16
+  sin_port: uint16
+  sin_addr: uint32
+  sin_zero: array<byte, 8>
+
+  constructor(port: uint16) {
+    this.sin_family = uint16(AF_INET)
+    this.sin_port = htons(port)
+    this.sin_addr = 0            // INADDR_ANY — htonl would be a no-op on zero
+    for i in 0..8 {
+      this.sin_zero[i] = 0
     }
-    if !writeAll(clientFd, base, bytesRead) {
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Socket
+//
+// A file descriptor with a deterministic destructor. This is the whole reason
+// the error paths below are three lines instead of ten — every `return` past
+// the constructor closes the fd on the way out, at a known point.
+// ---------------------------------------------------------------------------
+
+class Socket {
+  readonly fd: int32
+
+  constructor(fd: int32) {
+    this.fd = fd
+  }
+
+  destructor() {
+    close(this.fd)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Listener setup
+//
+// C has no exceptions to model, so failure is a sentinel return value, not a
+// return union — there's nothing unwinding that a union would be describing.
+// errno rides back alongside it in a tuple.
+// ---------------------------------------------------------------------------
+
+func listenOn(port: uint16): (Socket | null, int32) {
+  let fd = socket(AF_INET, SOCK_STREAM, 0)
+  if fd < 0 {
+    return (null, errno())
+  }
+
+  let s = Socket(fd)
+
+  var one: int32 = 1
+  if setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                addressof(one) as void_ptr,
+                uint32(sizeof<int32>())) < 0 {
+    return (null, errno())
+  }
+
+  var addr = sockaddr_in(port)
+  let sa = pointer_cast<sockaddr>(addressof(addr)) as const_ptr<sockaddr>
+
+  if bind(fd, sa, uint32(sizeof<sockaddr_in>())) < 0 {
+    return (null, errno())
+  }
+
+  if listen(fd, BACKLOG) < 0 {
+    return (null, errno())
+  }
+
+  return (s, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Echo
+// ---------------------------------------------------------------------------
+
+func echo(c: readonly Socket): void {
+  if let buf = try_alloc<byte>(BUFSIZE) {
+    let data = buf.data()
+
+    while true {
+      let n = read(c.fd, data, BUFSIZE)
+      if n <= 0 {
+        return
+      }
+
+      var sent: int64 = 0
+      while sent < n {
+        let w = write(c.fd,
+                      data.offset(usize(sent)) as const_ptr<byte>,
+                      usize(n - sent))
+        if w <= 0 {
+          return
+        }
+        sent += w
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Accept loop
+// ---------------------------------------------------------------------------
+
+func serve(s: readonly Socket): void {
+  while true {
+    let cfd = accept(s.fd, null, null)
+
+    if cfd < 0 {
+      if errno() === EINTR {
+        continue
+      }
       return
     }
+
+    let c = Socket(cfd)
+    echo(c)
+    // c's last reference dies here; destructor closes cfd
   }
 }
 
 func main(): int32 {
-  let serverFd: int32 = socket(AF_INET, SOCK_STREAM, 0)
-  if serverFd < 0 {
-    puts("socket() failed")
-    return 1
+  let (server, err) = listenOn(uint16(8080))
+
+  if let s = server {
+    serve(s)
+    return 0
   }
 
-  // Non-fatal: without it, rebinding after a restart fails while the old
-  // listener sits in TIME_WAIT.
-  var reuse: int32 = 1
-  setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, addressof(reuse), uint32(sizeof<int32>()))
-
-  var addr: SockAddrIn = SockAddrIn(uint16(AF_INET), htons(PORT), htonl(INADDR_ANY))
-
-  if bind(serverFd, addressof(addr), SOCKADDR_IN_LEN) < 0 {
-    puts("bind() failed")
-    close(serverFd)
-    return 1
-  }
-
-  if listen(serverFd, BACKLOG) < 0 {
-    puts("listen() failed")
-    close(serverFd)
-    return 1
-  }
-
-  puts("listening on port 8080")
-
-  // Single-threaded: one connection handled to completion before the next.
-  while true {
-    let clientFd: int32 = accept(serverFd, null, null)
-    if clientFd < 0 {
-      puts("accept() failed, continuing")
-      continue
-    }
-    handleClient(clientFd)
-    close(clientFd)
-  }
+  return err
 }

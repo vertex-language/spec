@@ -32,7 +32,7 @@ A `LineTerminator` inserts a `Terminator` when **both** hold:
 
 A `Terminator` may be omitted before a closing `}` or `)`.
 
-Rule-driven, not error-driven: a line beginning `(` or `[` cannot silently continue the previous statement. `;` remains a legal terminal everywhere.
+Rule-driven, not error-driven: a line beginning `(` or `[` cannot silently continue the previous statement. `;` remains a vaild terminal everywhere.
 
 ---
 
